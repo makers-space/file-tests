@@ -597,7 +597,8 @@ describe('Authentication Layer - Comprehensive Tests', () => {
                 client.clearCookies();
                 const response = await client.post('/api/v1/auth/logout');
                 
-                expect(response.status).toBe(401);
+                // 403 because CSRF validation fails before auth check (no cookies = no CSRF token)
+                expect(response.status).toBe(403);
                 expect(response.data.success).toBe(false);
             });
         });
@@ -641,7 +642,8 @@ describe('Authentication Layer - Comprehensive Tests', () => {
                 client.clearCookies();
                 const response = await client.post('/api/v1/auth/2fa/setup');
                 
-                expect(response.status).toBe(401);
+                // 403 because CSRF validation fails before auth check (no cookies = no CSRF token)
+                expect(response.status).toBe(403);
                 expect(response.data.success).toBe(false);
             });
         });
@@ -672,7 +674,8 @@ describe('Authentication Layer - Comprehensive Tests', () => {
                 client.clearCookies();
                 const response = await client.post('/api/v1/auth/2fa/verify-setup', {});
                 
-                expect(response.status).toBe(401);
+                // 403 because CSRF validation fails before auth check (no cookies = no CSRF token)
+                expect(response.status).toBe(403);
                 expect(response.data.success).toBe(false);
             });
 
@@ -684,7 +687,8 @@ describe('Authentication Layer - Comprehensive Tests', () => {
 
                 const response = await client.post('/api/v1/auth/2fa/verify-setup', verifyData);
                 
-                expect(response.status).toBe(401);
+                // 403 because CSRF validation fails before auth check (no cookies = no CSRF token)
+                expect(response.status).toBe(403);
                 expect(response.data.success).toBe(false);
             });
 
@@ -696,7 +700,8 @@ describe('Authentication Layer - Comprehensive Tests', () => {
 
                 const response = await client.post('/api/v1/auth/2fa/verify-setup', verifyData);
                 
-                expect(response.status).toBe(401);
+                // 403 because CSRF validation fails before auth check (no cookies = no CSRF token)
+                expect(response.status).toBe(403);
                 expect(response.data.success).toBe(false);
             });
         });
@@ -706,7 +711,8 @@ describe('Authentication Layer - Comprehensive Tests', () => {
                 client.clearCookies();
                 const response = await client.post('/api/v1/auth/2fa/disable', {});
                 
-                expect(response.status).toBe(401);
+                // 403 because CSRF validation fails before auth check (no cookies = no CSRF token)
+                expect(response.status).toBe(403);
                 expect(response.data.success).toBe(false);
             });
 
@@ -719,7 +725,8 @@ describe('Authentication Layer - Comprehensive Tests', () => {
 
                 const response = await client.post('/api/v1/auth/2fa/disable', disableData);
                 
-                expect(response.status).toBe(401);
+                // 403 because CSRF validation fails before auth check (no cookies = no CSRF token)
+                expect(response.status).toBe(403);
                 expect(response.data.success).toBe(false);
             });
         });
@@ -729,7 +736,8 @@ describe('Authentication Layer - Comprehensive Tests', () => {
                 client.clearCookies();
                 const response = await client.post('/api/v1/auth/2fa/backup-codes', {});
                 
-                expect(response.status).toBe(401);
+                // 403 because CSRF validation fails before auth check (no cookies = no CSRF token)
+                expect(response.status).toBe(403);
                 expect(response.data.success).toBe(false);
             });
 
@@ -742,7 +750,8 @@ describe('Authentication Layer - Comprehensive Tests', () => {
 
                 const response = await client.post('/api/v1/auth/2fa/backup-codes', codesData);
                 
-                expect(response.status).toBe(401);
+                // 403 because CSRF validation fails before auth check (no cookies = no CSRF token)
+                expect(response.status).toBe(403);
                 expect(response.data.success).toBe(false);
             });
         });
@@ -802,7 +811,8 @@ describe('Authentication Layer - Comprehensive Tests', () => {
                 client.clearCookies();
                 const response = await client.post('/api/v1/auth/send-verification-email');
                 
-                expect(response.status).toBe(401);
+                // 403 because CSRF validation fails before auth check (no cookies = no CSRF token)
+                expect(response.status).toBe(403);
                 expect(response.data.success).toBe(false);
             });
         });
@@ -882,7 +892,8 @@ describe('Authentication Layer - Comprehensive Tests', () => {
                 client.clearCookies();
                 const response = await client.post('/api/v1/auth/roles/request-elevation');
                 
-                expect(response.status).toBe(401);
+                // 403 because CSRF validation fails before auth check (no cookies = no CSRF token)
+                expect(response.status).toBe(403);
                 expect(response.data.success).toBe(false);
             });
         });
@@ -902,7 +913,8 @@ describe('Authentication Layer - Comprehensive Tests', () => {
                 client.clearCookies();
                 const response = await client.post(`/api/v1/auth/roles/approve/${userId}`);
                 
-                expect(response.status).toBe(401);
+                // 403 because CSRF validation fails before auth check (no cookies = no CSRF token)
+                expect(response.status).toBe(403);
                 expect(response.data.success).toBe(false);
             });
         });
@@ -920,7 +932,8 @@ describe('Authentication Layer - Comprehensive Tests', () => {
                 const userId = new mongoose.Types.ObjectId();
                 client.clearCookies();
                 const response = await client.post(`/api/v1/auth/roles/reject/${userId}`);
-                expect(response.status).toBe(401);
+                // 403 because CSRF validation fails before auth check (no cookies = no CSRF token)
+                expect(response.status).toBe(403);
                 expect(response.data.success).toBe(false);
             });
         });
@@ -1198,6 +1211,335 @@ describe('Authentication Layer - Comprehensive Tests', () => {
                 // At least one should succeed
                 const successes = results.filter(r => r.status === 200);
                 expect(successes.length).toBeGreaterThan(0);
+            });
+        });
+    });
+
+    // =========================================================================
+    // SECURITY FEATURES TESTS
+    // =========================================================================
+    describe('Security Features', () => {
+        
+        // =====================================================================
+        // CSRF Protection Tests
+        // =====================================================================
+        describe('CSRF Protection', () => {
+            test('should receive CSRF token cookie on first API request', async () => {
+                client.clearCookies();
+                
+                // Make any GET request to get CSRF token
+                const response = await client.get('/api/v1/auth/csrf-token');
+                
+                expect(response.status).toBe(200);
+                expect(response.data.success).toBe(true);
+                expect(response.data.csrfToken).toBeDefined();
+                
+                // Check that CSRF cookie was set
+                const cookies = client.getCookiesAsObject();
+                expect(cookies.csrfToken).toBeDefined();
+            });
+            
+            test('should allow login without CSRF token (exempt route)', async () => {
+                const userData = {
+                    firstName: 'CSRF',
+                    lastName: 'Test',
+                    username: 'csrftest_' + Date.now(),
+                    email: `csrftest.${Date.now()}@example.com`,
+                    password: 'CsrfPass123!'
+                };
+
+                client.clearCookies();
+                
+                // Signup should work without CSRF (exempt)
+                const signupResponse = await client.post('/api/v1/auth/signup', userData);
+                expect(signupResponse.status).toBe(201);
+                
+                // Clear and try login without CSRF token
+                client.clearCookies();
+                client.setCsrfToken(null);
+                
+                const loginResponse = await client.post('/api/v1/auth/login', {
+                    identifier: userData.email,
+                    password: userData.password
+                });
+                
+                expect(loginResponse.status).toBe(200);
+                expect(loginResponse.data.success).toBe(true);
+            });
+            
+            test('should reject protected POST without CSRF token', async () => {
+                // First login to get authenticated
+                await testStartup.loginAsUser('user');
+                
+                // Clear the stored CSRF token
+                client.setCsrfToken(null);
+                
+                // Get the current cookies and filter out the CSRF cookie
+                const cookieJar = client.cookieJar;
+                const cookies = cookieJar.getCookiesSync(client.baseURL);
+                
+                // Clear all cookies
+                cookieJar.removeAllCookiesSync();
+                
+                // Re-add all cookies except csrfToken
+                cookies.filter(c => c.key !== 'csrfToken').forEach(cookie => {
+                    cookieJar.setCookieSync(cookie, client.baseURL);
+                });
+                
+                // Try to make a protected request (2FA setup requires auth)
+                const response = await client.post('/api/v1/auth/2fa/setup', {});
+                
+                // Should be rejected due to missing CSRF
+                expect(response.status).toBe(403);
+                expect(response.data.message).toContain('CSRF');
+            });
+            
+            test('should reject request with mismatched CSRF token', async () => {
+                await testStartup.loginAsUser('user');
+                
+                // Set an invalid CSRF token
+                client.setCsrfToken('invalid-csrf-token-12345');
+                
+                // Try to make a protected request
+                const response = await client.post('/api/v1/auth/2fa/setup', {});
+                
+                // Should be rejected due to CSRF mismatch
+                expect(response.status).toBe(403);
+                expect(response.data.message).toContain('CSRF');
+            });
+            
+            test('should accept request with valid CSRF token', async () => {
+                await testStartup.loginAsUser('user');
+                
+                // Fetch fresh CSRF token
+                await client.fetchCsrfToken();
+                
+                // Make a protected request (2FA setup)
+                const response = await client.post('/api/v1/auth/2fa/setup', {});
+                
+                // Should succeed (or fail for other reasons, not CSRF)
+                expect(response.status).not.toBe(403);
+                // 2FA setup should return 200 with QR code
+                if (response.status === 200) {
+                    expect(response.data.qrCode).toBeDefined();
+                }
+            });
+        });
+        
+        // =====================================================================
+        // Refresh Token Rotation Tests
+        // =====================================================================
+        describe('Refresh Token Rotation', () => {
+            test('should issue new refresh token on each refresh', async () => {
+                // Create and login as a new user
+                const userData = {
+                    firstName: 'Rotation',
+                    lastName: 'Test',
+                    username: 'rotationtest_' + Date.now(),
+                    email: `rotationtest.${Date.now()}@example.com`,
+                    password: 'RotationPass123!'
+                };
+
+                client.clearCookies();
+                await client.post('/api/v1/auth/signup', userData);
+                
+                // Get initial cookies
+                const initialCookies = client.getCookiesAsObject();
+                const initialRefreshToken = initialCookies.refreshToken;
+                expect(initialRefreshToken).toBeDefined();
+                
+                // Refresh the token
+                await client.fetchCsrfToken();
+                const refreshResponse = await client.post('/api/v1/auth/refresh-token', {});
+                expect(refreshResponse.status).toBe(200);
+                
+                // Get new cookies
+                const newCookies = client.getCookiesAsObject();
+                const newRefreshToken = newCookies.refreshToken;
+                
+                // New refresh token should be different from the old one
+                expect(newRefreshToken).toBeDefined();
+                expect(newRefreshToken).not.toBe(initialRefreshToken);
+            });
+            
+            test('should reject reuse of old refresh token after rotation', async () => {
+                // Create and login as a new user
+                const userData = {
+                    firstName: 'Reuse',
+                    lastName: 'Test',
+                    username: 'reusetest_' + Date.now(),
+                    email: `reusetest.${Date.now()}@example.com`,
+                    password: 'ReusePass123!'
+                };
+
+                client.clearCookies();
+                await client.post('/api/v1/auth/signup', userData);
+                
+                // Store the original refresh token
+                const originalCookies = client.getCookiesAsObject();
+                const originalRefreshToken = originalCookies.refreshToken;
+                
+                // Refresh the token (this should invalidate the old one)
+                await client.fetchCsrfToken();
+                const firstRefresh = await client.post('/api/v1/auth/refresh-token', {});
+                expect(firstRefresh.status).toBe(200);
+                
+                // Now try to use the OLD refresh token (simulate attacker)
+                // We need to manually set the old token back
+                const cookieJar = client.cookieJar;
+                cookieJar.setCookieSync(`refreshToken=${originalRefreshToken}`, client.baseURL);
+                
+                // Attempt to refresh with the old (now invalid) token
+                const reuseResponse = await client.post('/api/v1/auth/refresh-token', {});
+                
+                // Should be rejected - token was already used
+                expect(reuseResponse.status).toBe(401);
+                expect(reuseResponse.data.success).toBe(false);
+            });
+            
+            test('should invalidate entire token family on reuse detection', async () => {
+                // Create and login as a new user
+                const userData = {
+                    firstName: 'Family',
+                    lastName: 'Test',
+                    username: 'familytest_' + Date.now(),
+                    email: `familytest.${Date.now()}@example.com`,
+                    password: 'FamilyPass123!'
+                };
+
+                client.clearCookies();
+                await client.post('/api/v1/auth/signup', userData);
+                
+                // Store original tokens
+                const originalCookies = client.getCookiesAsObject();
+                const originalRefreshToken = originalCookies.refreshToken;
+                
+                // First refresh - legitimate
+                await client.fetchCsrfToken();
+                const firstRefresh = await client.post('/api/v1/auth/refresh-token', {});
+                expect(firstRefresh.status).toBe(200);
+                
+                // Store the new token
+                const newCookies = client.getCookiesAsObject();
+                const newRefreshToken = newCookies.refreshToken;
+                
+                // Simulate attacker using old token (triggers family invalidation)
+                const cookieJar = client.cookieJar;
+                cookieJar.setCookieSync(`refreshToken=${originalRefreshToken}`, client.baseURL);
+                const attackerRefresh = await client.post('/api/v1/auth/refresh-token', {});
+                expect(attackerRefresh.status).toBe(401);
+                
+                // Now the legitimate user's token should also be invalid
+                // because the entire family was invalidated
+                cookieJar.setCookieSync(`refreshToken=${newRefreshToken}`, client.baseURL);
+                const legitimateRefresh = await client.post('/api/v1/auth/refresh-token', {});
+                
+                // Should also be rejected because family is invalidated
+                expect(legitimateRefresh.status).toBe(401);
+            });
+        });
+        
+        // =====================================================================
+        // Token Security Tests
+        // =====================================================================
+        describe('Token Security', () => {
+            test('should include familyId in refresh token for chain tracking', async () => {
+                const userData = {
+                    firstName: 'Chain',
+                    lastName: 'Track',
+                    username: 'chaintrack_' + Date.now(),
+                    email: `chaintrack.${Date.now()}@example.com`,
+                    password: 'ChainPass123!'
+                };
+
+                client.clearCookies();
+                await client.post('/api/v1/auth/signup', userData);
+                
+                // Get refresh token and decode it
+                const cookies = client.getCookiesAsObject();
+                const refreshToken = cookies.refreshToken;
+                
+                // Decode the JWT (without verification) to check structure
+                const parts = refreshToken.split('.');
+                const payload = JSON.parse(Buffer.from(parts[1], 'base64').toString());
+                
+                // Should have familyId for chain tracking
+                expect(payload.familyId).toBeDefined();
+                expect(payload.id).toBeDefined();
+                expect(payload.nonce).toBeDefined();
+            });
+            
+            test('should maintain same familyId during token rotation', async () => {
+                const userData = {
+                    firstName: 'SameFamily',
+                    lastName: 'Test',
+                    username: 'samefamily_' + Date.now(),
+                    email: `samefamily.${Date.now()}@example.com`,
+                    password: 'SamePass123!'
+                };
+
+                client.clearCookies();
+                await client.post('/api/v1/auth/signup', userData);
+                
+                // Get original token and extract familyId
+                const originalCookies = client.getCookiesAsObject();
+                const originalToken = originalCookies.refreshToken;
+                const originalParts = originalToken.split('.');
+                const originalPayload = JSON.parse(Buffer.from(originalParts[1], 'base64').toString());
+                
+                // Refresh the token
+                await client.fetchCsrfToken();
+                await client.post('/api/v1/auth/refresh-token', {});
+                
+                // Get new token and extract familyId
+                const newCookies = client.getCookiesAsObject();
+                const newToken = newCookies.refreshToken;
+                const newParts = newToken.split('.');
+                const newPayload = JSON.parse(Buffer.from(newParts[1], 'base64').toString());
+                
+                // Family ID should be the same (rotation within same family)
+                expect(newPayload.familyId).toBe(originalPayload.familyId);
+                
+                // But nonce should be different (unique token)
+                expect(newPayload.nonce).not.toBe(originalPayload.nonce);
+            });
+            
+            test('should create new familyId on fresh login', async () => {
+                const userData = {
+                    firstName: 'NewFamily',
+                    lastName: 'Test',
+                    username: 'newfamily_' + Date.now(),
+                    email: `newfamily.${Date.now()}@example.com`,
+                    password: 'NewPass123!'
+                };
+
+                client.clearCookies();
+                await client.post('/api/v1/auth/signup', userData);
+                
+                // Get family from signup
+                const signupCookies = client.getCookiesAsObject();
+                const signupToken = signupCookies.refreshToken;
+                const signupParts = signupToken.split('.');
+                const signupPayload = JSON.parse(Buffer.from(signupParts[1], 'base64').toString());
+                
+                // Logout and login again
+                await client.fetchCsrfToken();
+                await client.post('/api/v1/auth/logout', {});
+                
+                client.clearCookies();
+                await client.post('/api/v1/auth/login', {
+                    identifier: userData.email,
+                    password: userData.password
+                });
+                
+                // Get family from fresh login
+                const loginCookies = client.getCookiesAsObject();
+                const loginToken = loginCookies.refreshToken;
+                const loginParts = loginToken.split('.');
+                const loginPayload = JSON.parse(Buffer.from(loginParts[1], 'base64').toString());
+                
+                // Family ID should be different (new session)
+                expect(loginPayload.familyId).not.toBe(signupPayload.familyId);
             });
         });
     });

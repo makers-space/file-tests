@@ -1,5 +1,5 @@
 /**
- * Simple API Client for Tests - Updated for Cookie-Based Authentication
+ * Simple API Client for Tests - Updated for Cookie-Based Authentication with CSRF Support
  */
 
 import axios from 'axios';
@@ -17,6 +17,7 @@ class ApiClient {
         // Create a cookie jar for manual cookie handling
         this.cookieJar = new CookieJar();
         this.baseURL = baseURL;
+        this.csrfToken = null; // Store CSRF token for state-changing requests
         
         this.client = axios.create({
             baseURL,
@@ -25,12 +26,22 @@ class ApiClient {
             withCredentials: true // Enable cookie support
         });
 
-        // Add request interceptor to add cookies to requests
+        // Add request interceptor to add cookies and CSRF token to requests
         this.client.interceptors.request.use((config) => {
             const cookies = this.cookieJar.getCookieStringSync(this.baseURL);
             if (cookies) {
                 config.headers.Cookie = cookies;
             }
+            
+            // Add CSRF token for state-changing requests
+            if (['post', 'put', 'patch', 'delete'].includes(config.method?.toLowerCase())) {
+                // Get CSRF token from cookie jar if not manually set
+                const csrfFromCookie = this.getCsrfTokenFromCookies();
+                if (csrfFromCookie || this.csrfToken) {
+                    config.headers['X-CSRF-Token'] = this.csrfToken || csrfFromCookie;
+                }
+            }
+            
             return config;
         });
 
@@ -58,7 +69,39 @@ class ApiClient {
     // Method to clear cookies for cookie-based authentication
     clearCookies() {
         this.cookieJar.removeAllCookiesSync();
-        console.log('Cookies cleared from cookie jar');
+        this.csrfToken = null;
+        console.log('Cookies and CSRF token cleared from cookie jar');
+    }
+    
+    /**
+     * Get CSRF token from cookies
+     * @returns {string|null} CSRF token or null
+     */
+    getCsrfTokenFromCookies() {
+        const cookies = this.getCookiesAsObject();
+        return cookies.csrfToken || null;
+    }
+    
+    /**
+     * Manually set CSRF token (for testing)
+     * @param {string} token - CSRF token
+     */
+    setCsrfToken(token) {
+        this.csrfToken = token;
+    }
+    
+    /**
+     * Fetch a fresh CSRF token from the server
+     * @returns {Promise<string>} CSRF token
+     */
+    async fetchCsrfToken() {
+        const response = await this.get('/api/v1/auth/csrf-token');
+        if (response?.data?.csrfToken) {
+            this.csrfToken = response.data.csrfToken;
+            return this.csrfToken;
+        }
+        // Try to get from cookie if response didn't include it
+        return this.getCsrfTokenFromCookies();
     }
 
     async get(url) {
