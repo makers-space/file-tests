@@ -1,0 +1,31 @@
+{
+  "name": "app-base-tests",
+  "version": "1.0.0",
+  "description": "Test suite for App Base API",
+  "type": "module",
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:ui": "vitest --ui",
+    "test:app": "vitest run server/app.test.js",
+    "test:auth": "vitest run server/auth.test.js",
+    "test:cache": "vitest run server/cache.test.js",
+    "test:file": "vitest run server/file.test.js",
+    "test:user": "vitest run server/user.test.js",
+    "test:coverage": "vitest run --coverage"
+  },
+  "dependencies": {
+    "axios": "^1.12.2",
+    "bcryptjs": "^3.0.2",
+    "dotenv": "^17.2.2",
+    "jsonwebtoken": "^9.0.2",
+    "mongoose": "^8.18.2",
+    "tough-cookie": "^6.0.0",
+    "ws": "^8.18.3",
+    "yjs": "^13.6.27"
+  },
+  "devDependencies": {
+    "@vitest/ui": "^3.2.4",
+    "vitest": "^3.2.4"
+  }
+}

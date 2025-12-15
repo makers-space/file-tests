@@ -1,0 +1,32 @@
+# Dependency directories
+node_modules/
+
+# Package lock files
+package-lock.json
+
+# Log files
+logs/
+*.log
+
+# IDE folders
+.idea/
+.vscode/
+
+# Environment variables
+.env
+.env.local
+.env.development
+.env.test
+.env.production
+
+# Cache folders
+.npm
+.eslintcache
+.jest-cache/
+
+# OS generated files
+.DS_Store
+Thumbs.db
+
+# Test cache folders
+/coverage
