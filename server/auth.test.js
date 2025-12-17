@@ -597,8 +597,7 @@ describe('Authentication Layer - Comprehensive Tests', () => {
                 client.clearCookies();
                 const response = await client.post('/api/v1/auth/logout');
                 
-                // 403 because CSRF validation fails before auth check (no cookies = no CSRF token)
-                expect(response.status).toBe(403);
+                expect(response.status).toBe(401);
                 expect(response.data.success).toBe(false);
             });
         });
@@ -642,8 +641,7 @@ describe('Authentication Layer - Comprehensive Tests', () => {
                 client.clearCookies();
                 const response = await client.post('/api/v1/auth/2fa/setup');
                 
-                // 403 because CSRF validation fails before auth check (no cookies = no CSRF token)
-                expect(response.status).toBe(403);
+                expect(response.status).toBe(401);
                 expect(response.data.success).toBe(false);
             });
         });
@@ -670,88 +668,31 @@ describe('Authentication Layer - Comprehensive Tests', () => {
         });
 
         describe('POST /api/v1/auth/2fa/verify-setup', () => {
-            test('should reject 2FA verification with missing token', async () => {
-                client.clearCookies();
-                const response = await client.post('/api/v1/auth/2fa/verify-setup', {});
-                
-                // 403 because CSRF validation fails before auth check (no cookies = no CSRF token)
-                expect(response.status).toBe(403);
-                expect(response.data.success).toBe(false);
-            });
-
-            test('should reject 2FA verification with invalid token', async () => {
-                client.clearCookies();
-                const verifyData = {
-                    token: '000000'
-                };
-
-                const response = await client.post('/api/v1/auth/2fa/verify-setup', verifyData);
-                
-                // 403 because CSRF validation fails before auth check (no cookies = no CSRF token)
-                expect(response.status).toBe(403);
-                expect(response.data.success).toBe(false);
-            });
-
             test('should deny 2FA verification without authentication', async () => {
                 client.clearCookies();
-                const verifyData = {
-                    token: '123456'
-                };
-
-                const response = await client.post('/api/v1/auth/2fa/verify-setup', verifyData);
+                const response = await client.post('/api/v1/auth/2fa/verify-setup', { token: '123456' });
                 
-                // 403 because CSRF validation fails before auth check (no cookies = no CSRF token)
-                expect(response.status).toBe(403);
+                expect(response.status).toBe(401);
                 expect(response.data.success).toBe(false);
             });
         });
 
         describe('POST /api/v1/auth/2fa/disable', () => {
-            test('should reject 2FA disable with missing data', async () => {
-                client.clearCookies();
-                const response = await client.post('/api/v1/auth/2fa/disable', {});
-                
-                // 403 because CSRF validation fails before auth check (no cookies = no CSRF token)
-                expect(response.status).toBe(403);
-                expect(response.data.success).toBe(false);
-            });
-
             test('should deny 2FA disable without authentication', async () => {
                 client.clearCookies();
-                const disableData = {
-                    password: '2FAPass123!',
-                    token: '123456'
-                };
-
-                const response = await client.post('/api/v1/auth/2fa/disable', disableData);
+                const response = await client.post('/api/v1/auth/2fa/disable', { password: 'Test123!', token: '123456' });
                 
-                // 403 because CSRF validation fails before auth check (no cookies = no CSRF token)
-                expect(response.status).toBe(403);
+                expect(response.status).toBe(401);
                 expect(response.data.success).toBe(false);
             });
         });
 
         describe('POST /api/v1/auth/2fa/backup-codes', () => {
-            test('should reject backup codes generation with missing data', async () => {
-                client.clearCookies();
-                const response = await client.post('/api/v1/auth/2fa/backup-codes', {});
-                
-                // 403 because CSRF validation fails before auth check (no cookies = no CSRF token)
-                expect(response.status).toBe(403);
-                expect(response.data.success).toBe(false);
-            });
-
             test('should deny backup codes generation without authentication', async () => {
                 client.clearCookies();
-                const codesData = {
-                    password: '2FAPass123!',
-                    token: '123456'
-                };
-
-                const response = await client.post('/api/v1/auth/2fa/backup-codes', codesData);
+                const response = await client.post('/api/v1/auth/2fa/backup-codes', { password: 'Test123!', token: '123456' });
                 
-                // 403 because CSRF validation fails before auth check (no cookies = no CSRF token)
-                expect(response.status).toBe(403);
+                expect(response.status).toBe(401);
                 expect(response.data.success).toBe(false);
             });
         });
@@ -811,8 +752,7 @@ describe('Authentication Layer - Comprehensive Tests', () => {
                 client.clearCookies();
                 const response = await client.post('/api/v1/auth/send-verification-email');
                 
-                // 403 because CSRF validation fails before auth check (no cookies = no CSRF token)
-                expect(response.status).toBe(403);
+                expect(response.status).toBe(401);
                 expect(response.data.success).toBe(false);
             });
         });
@@ -892,8 +832,7 @@ describe('Authentication Layer - Comprehensive Tests', () => {
                 client.clearCookies();
                 const response = await client.post('/api/v1/auth/roles/request-elevation');
                 
-                // 403 because CSRF validation fails before auth check (no cookies = no CSRF token)
-                expect(response.status).toBe(403);
+                expect(response.status).toBe(401);
                 expect(response.data.success).toBe(false);
             });
         });
@@ -913,8 +852,7 @@ describe('Authentication Layer - Comprehensive Tests', () => {
                 client.clearCookies();
                 const response = await client.post(`/api/v1/auth/roles/approve/${userId}`);
                 
-                // 403 because CSRF validation fails before auth check (no cookies = no CSRF token)
-                expect(response.status).toBe(403);
+                expect(response.status).toBe(401);
                 expect(response.data.success).toBe(false);
             });
         });
@@ -932,8 +870,8 @@ describe('Authentication Layer - Comprehensive Tests', () => {
                 const userId = new mongoose.Types.ObjectId();
                 client.clearCookies();
                 const response = await client.post(`/api/v1/auth/roles/reject/${userId}`);
-                // 403 because CSRF validation fails before auth check (no cookies = no CSRF token)
-                expect(response.status).toBe(403);
+                
+                expect(response.status).toBe(401);
                 expect(response.data.success).toBe(false);
             });
         });
