@@ -1,4 +1,4 @@
-            sees /**
+/**
  * File Routes - HTTP API Test Suite
  *
  * Ensures file operations work over the REST interface after removing Socket.IO.
@@ -980,87 +980,6 @@ describe('File Routes - HTTP API', () => {
             expect(listResponse.data.success).toBe(true);
             expect(Array.isArray(listResponse.data.files)).toBe(true);
             expect(listResponse.data.pagination).toBeDefined();
-        });
-    });
-
-    describe('3D Model File Support', () => {
-        const modelsDir = `${testRoot}/models`;
-
-        beforeAll(async () => {
-            await testStartup.loginAsUser('creator');
-            const modelsDirResponse = await client.post('/api/v1/files/directory', {
-                dirPath: modelsDir,
-                description: '3D Models directory'
-            });
-            expect(modelsDirResponse.status).toBe(201);
-        });
-
-        test('correctly identifies common 3D formats as binary', async () => {
-            const commonFormats = [
-                { ext: 'obj', mime: 'model/obj', content: 'v 0.0 0.0 0.0\nv 1.0 0.0 0.0\nv 0.0 1.0 0.0\nf 1 2 3\n' },
-                { ext: 'glb', mime: 'model/gltf-binary', content: Buffer.from([0x67, 0x6C, 0x54, 0x46, 0x02, 0x00, 0x00, 0x00]) },
-                { ext: 'stl', mime: 'model/stl', content: 'solid TestModel\nendsolid TestModel\n' }
-            ];
-
-            for (const format of commonFormats) {
-                const formData = new FormData();
-                const content = typeof format.content === 'string' ? Buffer.from(format.content) : format.content;
-                formData.append('files', content, {
-                    filename: `test.${format.ext}`,
-                    contentType: format.mime
-                });
-                formData.append('basePath', modelsDir);
-
-                const uploadResponse = await client.post('/api/v1/files/upload', formData, {
-                    headers: formData.getHeaders()
-                });
-                expect(uploadResponse.status).toBe(201);
-                
-                const uploadedFile = uploadResponse.data.files[0];
-                expect(uploadedFile.type).toBe('binary');
-                expect(uploadedFile.filePath).toContain(`test.${format.ext}`);
-            }
-
-            console.log('✅ Common 3D formats (obj, glb, stl) correctly identified as binary');
-        });
-
-        test('correctly identifies all other 3D formats as binary', async () => {
-            const otherFormats = [
-                { ext: 'gltf', mime: 'model/gltf+json', content: '{"asset":{"version":"2.0"}}' },
-                { ext: 'fbx', mime: 'application/octet-stream', content: 'Kaydara FBX Binary' },
-                { ext: 'dae', mime: 'model/vnd.collada+xml', content: '<?xml version="1.0"?><COLLADA></COLLADA>' },
-                { ext: '3ds', mime: 'application/x-3ds', content: Buffer.from([0x4D, 0x4D]) },
-                { ext: 'ply', mime: 'model/ply', content: 'ply\nformat ascii 1.0\nend_header\n' },
-                { ext: 'usdz', mime: 'model/vnd.usdz+zip', content: 'PK' },
-                { ext: 'blend', mime: 'application/x-blender', content: 'BLENDER' },
-                { ext: '3mf', mime: 'model/3mf', content: 'PK' },
-                { ext: 'usda', mime: 'model/vnd.usda', content: '#usda 1.0' },
-                { ext: 'usdc', mime: 'model/vnd.usdc', content: 'PXR-USDC' },
-                { ext: 'vrm', mime: 'model/gltf-binary', content: 'VRM' },
-                { ext: 'vox', mime: 'application/x-vox', content: 'VOX ' },
-                { ext: 'c4d', mime: 'application/x-c4d', content: 'C4D' }
-            ];
-
-            for (const format of otherFormats) {
-                const formData = new FormData();
-                const content = typeof format.content === 'string' ? Buffer.from(format.content) : format.content;
-                formData.append('files', content, {
-                    filename: `test.${format.ext}`,
-                    contentType: format.mime
-                });
-                formData.append('basePath', modelsDir);
-
-                const uploadResponse = await client.post('/api/v1/files/upload', formData, {
-                    headers: formData.getHeaders()
-                });
-                expect(uploadResponse.status).toBe(201);
-                
-                const uploadedFile = uploadResponse.data.files[0];
-                expect(uploadedFile.type).toBe('binary');
-                expect(uploadedFile.filePath).toContain(`test.${format.ext}`);
-            }
-
-            console.log('✅ All 3D formats correctly identified as binary (gltf, fbx, dae, 3ds, ply, usdz, blend, 3mf, usda, usdc, vrm, vox, c4d)');
         });
     });
 

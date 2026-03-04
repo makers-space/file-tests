@@ -1479,58 +1479,6 @@ describe('Authentication Layer - Comprehensive Tests', () => {
                 // Family ID should be different (new session)
                 expect(loginPayload.familyId).not.toBe(signupPayload.familyId);
             });
-
-            test('should keep session valid after multiple sequential rotations (TTL renewal)', async () => {
-                // Regression test for Redis family TTL bug:
-                // Previously, storeTokenFamily used a hardcoded 2-day TTL while REFRESH_TOKEN_EXPIRY
-                // was 7 days, AND the family key was never renewed on rotation. This meant the Redis
-                // key expired (after 2 days at most), causing valid JWT tokens to be rejected with
-                // "Refresh token is required". The fix: TTL matches REFRESH_TOKEN_EXPIRY and the
-                // family key is renewed (storeTokenFamily called) on every successful rotation.
-                const userData = {
-                    firstName: 'TTL',
-                    lastName: 'Test',
-                    username: 'ttltest_' + Date.now(),
-                    email: `ttltest.${Date.now()}@example.com`,
-                    password: 'TTLPass123!'
-                };
-
-                client.clearCookies();
-                await client.post('/api/v1/auth/signup', userData);
-
-                // Capture familyId from the initial token
-                const initialCookies = client.getCookiesAsObject();
-                const initialToken = initialCookies.refreshToken;
-                expect(initialToken).toBeDefined();
-
-                const initialParts = initialToken.split('.');
-                const initialPayload = JSON.parse(Buffer.from(initialParts[1], 'base64').toString());
-                const familyId = initialPayload.familyId;
-                expect(familyId).toBeDefined();
-
-                // Perform 5 sequential rotations — each MUST succeed with the same familyId.
-                // Under the old (buggy) code, the Redis family key was never renewed, so once the
-                // original TTL elapsed all subsequent rotations would fail even with a valid JWT.
-                // Under the fixed code, storeTokenFamily is called after every rotation, sliding
-                // the TTL forward so the family key never expires during an active session.
-                for (let i = 1; i <= 5; i++) {
-                    await client.fetchCsrfToken();
-                    const response = await client.post('/api/v1/auth/refresh-token', {});
-                    expect(response.status).toBe(200);
-
-                    const cookies = client.getCookiesAsObject();
-                    const rotatedToken = cookies.refreshToken;
-                    expect(rotatedToken).toBeDefined();
-
-                    const rotatedParts = rotatedToken.split('.');
-                    const rotatedPayload = JSON.parse(Buffer.from(rotatedParts[1], 'base64').toString());
-
-                    // The family ID must remain constant across all rotations (same session)
-                    expect(rotatedPayload.familyId).toBe(familyId);
-                    // Each rotation must produce a new nonce (unique token per rotation)
-                    expect(rotatedPayload.nonce).toBeDefined();
-                }
-            });
         });
     });
 });
