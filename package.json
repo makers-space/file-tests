@@ -19,6 +19,7 @@
     "bcryptjs": "^3.0.2",
     "dotenv": "^17.2.2",
     "jsonwebtoken": "^9.0.2",
+    "jszip": "^3.10.1",
     "mongoose": "^8.18.2",
     "tough-cookie": "^6.0.0",
     "ws": "^8.18.3",

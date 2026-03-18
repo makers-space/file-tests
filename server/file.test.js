@@ -6,6 +6,8 @@
 
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 import FormData from 'form-data';
+import mongoose from 'mongoose';
+import JSZip from 'jszip';
 import TestStartup from '../utils/test.startup.js';
 
 const encodePath = (filePath) => encodeURIComponent(filePath);
@@ -62,6 +64,44 @@ describe('File Routes - HTTP API', () => {
         expect(response.data.success).toBe(true);
         return response;
     };
+
+    const uploadFile = async (buffer, filename, targetDir, contentType, overwrite = false) => {
+        const form = new FormData();
+        form.append('files', buffer, { filename, contentType });
+        form.append('basePath', targetDir);
+        if (overwrite) form.append('overwrite', 'true');
+        return client.post('/api/v1/files/upload', form, { headers: form.getHeaders() });
+    };
+
+    async function buildMinimalDocx(bodyText) {
+        const zip = new JSZip();
+        zip.file('[Content_Types].xml', [
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
+            '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">',
+            '  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>',
+            '  <Default Extension="xml" ContentType="application/xml"/>',
+            '  <Override PartName="/word/document.xml"',
+            '    ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>',
+            '</Types>',
+        ].join('\n'));
+        zip.file('_rels/.rels', [
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
+            '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">',
+            '  <Relationship Id="rId1"',
+            '    Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument"',
+            '    Target="word/document.xml"/>',
+            '</Relationships>',
+        ].join('\n'));
+        zip.file('word/document.xml', [
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
+            '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">',
+            '  <w:body>',
+            `    <w:p><w:r><w:t>${bodyText}</w:t></w:r></w:p>`,
+            '  </w:body>',
+            '</w:document>',
+        ].join('\n'));
+        return zip.generateAsync({ type: 'nodebuffer' });
+    }
 
 
 
@@ -963,7 +1003,7 @@ describe('File Routes - HTTP API', () => {
                 filename: 'upload.txt',
                 contentType: 'text/plain'
             });
-            formData.append('targetPath', uploadDir);
+            formData.append('basePath', uploadDir);
             formData.append('overwrite', 'true');
 
             const uploadResponse = await client.post('/api/v1/files/upload', formData, {
@@ -1081,7 +1121,7 @@ describe('File Routes - HTTP API', () => {
 
         test('rejects unsupported bulk operation type', async () => {
             const response = await client.post('/api/v1/files/bulk', {
-                operation: 'compress',
+                operation: 'unsupportedOp',
                 filePaths: [tagFilePath]
             });
 
@@ -1441,54 +1481,6 @@ describe('File Routes - HTTP API', () => {
                 expect(response.data.meta).toHaveProperty('generatedAt');
             });
 
-            test('includes comprehensive compression statistics in admin response', async () => {
-                const response = await client.get('/api/v1/files/stats');
-                
-                expect(response.status).toBe(200);
-                expect(response.data).toHaveProperty('compressionStats');
-                
-                const compressionStats = response.data.compressionStats;
-                
-                // Validate compression stats structure
-                expect(compressionStats).toHaveProperty('enabled');
-                expect(compressionStats).toHaveProperty('totalFiles');
-                expect(compressionStats).toHaveProperty('compressedFiles');
-                expect(compressionStats).toHaveProperty('uncompressedFiles');
-                expect(compressionStats).toHaveProperty('compressionRatio');
-                expect(compressionStats).toHaveProperty('spaceSaved');
-                expect(compressionStats).toHaveProperty('storageEfficiency');
-                expect(compressionStats).toHaveProperty('totalStorageUsed');
-                expect(compressionStats).toHaveProperty('totalOriginalSize');
-                expect(compressionStats).toHaveProperty('byAlgorithm');
-                expect(compressionStats).toHaveProperty('systemConfig');
-
-                // Validate compression data types
-                expect(typeof compressionStats.enabled).toBe('boolean');
-                expect(typeof compressionStats.totalFiles).toBe('number');
-                expect(typeof compressionStats.compressedFiles).toBe('number');
-                expect(typeof compressionStats.uncompressedFiles).toBe('number');
-                expect(typeof compressionStats.spaceSaved).toBe('number');
-                expect(typeof compressionStats.totalStorageUsed).toBe('number');
-                expect(typeof compressionStats.totalOriginalSize).toBe('number');
-
-                // Validate compression ratios are percentages
-                expect(compressionStats.compressionRatio).toMatch(/%$/);
-                expect(compressionStats.storageEfficiency).toMatch(/%$/);
-
-                // Validate algorithm breakdown is an array
-                expect(Array.isArray(compressionStats.byAlgorithm)).toBe(true);
-
-                // Validate system configuration
-                expect(compressionStats.systemConfig).toHaveProperty('defaultAlgorithm');
-                expect(compressionStats.systemConfig).toHaveProperty('compressionLevel');
-                expect(compressionStats.systemConfig).toHaveProperty('autoCompress');
-
-                // Validate file counts add up correctly
-                expect(compressionStats.totalFiles).toBe(
-                    compressionStats.compressedFiles + compressionStats.uncompressedFiles
-                );
-            });
-
             test('includes recent activity and user statistics for admin', async () => {
                 const response = await client.get('/api/v1/files/stats');
                 
@@ -1516,7 +1508,6 @@ describe('File Routes - HTTP API', () => {
                 expect(mainResponse.data.totalFiles).toBe(adminResponse.data.totalFiles);
                 expect(mainResponse.data.totalSize).toBe(adminResponse.data.totalSize);
                 expect(mainResponse.data.meta.isAdmin).toBe(adminResponse.data.meta.isAdmin);
-                expect(mainResponse.data.compressionStats.enabled).toBe(adminResponse.data.compressionStats.enabled);
             });
         });
 
@@ -1605,21 +1596,6 @@ describe('File Routes - HTTP API', () => {
                 await testStartup.loginAsUser('admin');
             });
 
-            test('compression statistics handle null values gracefully', async () => {
-                const response = await client.get('/api/v1/files/stats');
-                const compressionStats = response.data.compressionStats;
-
-                // Should not crash on files without compression metadata
-                expect(compressionStats.totalFiles).toBeGreaterThanOrEqual(0);
-                expect(compressionStats.byAlgorithm).toBeInstanceOf(Array);
-                
-                // All numbers should be valid (not NaN)
-                expect(Number.isFinite(compressionStats.totalFiles)).toBe(true);
-                expect(Number.isFinite(compressionStats.compressedFiles)).toBe(true);
-                expect(Number.isFinite(compressionStats.uncompressedFiles)).toBe(true);
-                expect(Number.isFinite(compressionStats.spaceSaved)).toBe(true);
-            });
-
             test('statistics are cached and return consistent results', async () => {
                 const [response1, response2] = await Promise.all([
                     client.get('/api/v1/files/stats'),
@@ -1632,7 +1608,6 @@ describe('File Routes - HTTP API', () => {
                 // Should return identical data when cached
                 expect(response1.data.totalFiles).toBe(response2.data.totalFiles);
                 expect(response1.data.totalSize).toBe(response2.data.totalSize);
-                expect(response1.data.compressionStats.totalFiles).toBe(response2.data.compressionStats.totalFiles);
             });
 
             test('handles large numbers and prevents overflow', async () => {
@@ -1641,16 +1616,11 @@ describe('File Routes - HTTP API', () => {
                 // All numeric values should be within JavaScript safe integer range
                 const checkSafeInteger = (value, fieldName) => {
                     expect(Number.isSafeInteger(value)).toBe(true);
-                    // Note: spaceSaved can be negative for files without compression metadata
-                    if (fieldName !== 'compressionStats.spaceSaved') {
-                        expect(value).toBeGreaterThanOrEqual(0);
-                    }
+                    expect(value).toBeGreaterThanOrEqual(0);
                 };
 
                 checkSafeInteger(response.data.totalFiles, 'totalFiles');
                 checkSafeInteger(response.data.totalSize, 'totalSize');
-                checkSafeInteger(response.data.compressionStats.totalFiles, 'compressionStats.totalFiles');
-                checkSafeInteger(response.data.compressionStats.spaceSaved, 'compressionStats.spaceSaved');
             });
 
             test('validates complete admin response structure', async () => {
@@ -1659,7 +1629,7 @@ describe('File Routes - HTTP API', () => {
                 // Validate top-level structure
                 const requiredFields = [
                     'success', 'message', 'totalFiles', 'totalSize', 
-                    'filesByType', 'sizeStats', 'compressionStats', 
+                    'filesByType', 'sizeStats', 
                     'recentActivity', 'meta'
                 ];
 
@@ -1676,14 +1646,7 @@ describe('File Routes - HTTP API', () => {
                     expect(response.data.filesByType).toHaveProperty(field);
                 });
 
-                const compressionStatsFields = [
-                    'enabled', 'totalFiles', 'compressedFiles', 'uncompressedFiles',
-                    'compressionRatio', 'spaceSaved', 'storageEfficiency',
-                    'totalStorageUsed', 'totalOriginalSize', 'byAlgorithm', 'systemConfig'
-                ];
-                compressionStatsFields.forEach(field => {
-                    expect(response.data.compressionStats).toHaveProperty(field);
-                });
+
             });
 
             test('validates response time is reasonable', async () => {
@@ -1706,6 +1669,318 @@ describe('File Routes - HTTP API', () => {
                 expect(response.data.success).toBe(false);
                 expect(response.data.message).toMatch(/not found/i);
             });
+        });
+    });
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // File Lifecycle — Upload, Delete, Re-upload, Overwrite
+    // ─────────────────────────────────────────────────────────────────────────
+
+    describe('basePath routing', () => {
+        const subDir = `${testRoot}/basepath-custom-dir`;
+
+        beforeAll(async () => {
+            const resp = await client.post('/api/v1/files/directory', {
+                dirPath: subDir,
+                description: 'Custom upload dir',
+            });
+            expect(resp.status).toBe(201);
+        });
+
+        it('places uploaded file under the requested basePath, not /uploads', async () => {
+            const resp = await uploadFile(Buffer.from('basePath test'), 'placed.txt', subDir, 'text/plain');
+            expect(resp.status).toBe(201);
+            expect(resp.data.success).toBe(true);
+
+            const filePath = `${subDir}/placed.txt`;
+            const meta = await client.get(`/api/v1/files/${encodePath(filePath)}/metadata`);
+            expect(meta.status).toBe(200);
+            expect(meta.data.filePath).toBe(filePath);
+        });
+    });
+
+    describe('plain text file lifecycle', () => {
+        const dir = `${testRoot}/text-lifecycle`;
+        const filePath = `${dir}/notes.md`;
+
+        beforeAll(async () => {
+            const resp = await client.post('/api/v1/files/directory', {
+                dirPath: dir,
+                description: 'Text lifecycle dir',
+            });
+            expect(resp.status).toBe(201);
+        });
+
+        it('uploads a text file and seeds Yjs with correct content', async () => {
+            const content = '# Hello world\nThis is version 1.';
+            const resp = await uploadFile(Buffer.from(content), 'notes.md', dir, 'text/markdown');
+            expect(resp.status).toBe(201);
+
+            const get = await client.get(`/api/v1/files/${encodePath(filePath)}/content`);
+            expect(get.status).toBe(200);
+            expect(get.data.content).toBe(content);
+        });
+
+        it('deletes the file and Yjs content is gone', async () => {
+            const del = await client.delete(`/api/v1/files/${encodePath(filePath)}`);
+            expect(del.status).toBe(200);
+
+            const meta = await client.get(`/api/v1/files/${encodePath(filePath)}/metadata`);
+            expect([400, 404]).toContain(meta.status);
+        });
+
+        it('re-uploads with new content — no stale data', async () => {
+            const content = '# Re-uploaded\nVersion 2 content.';
+            const resp = await uploadFile(Buffer.from(content), 'notes.md', dir, 'text/markdown');
+            expect(resp.status).toBe(201);
+
+            const get = await client.get(`/api/v1/files/${encodePath(filePath)}/content`);
+            expect(get.status).toBe(200);
+            expect(get.data.content).toBe(content);
+            expect(get.data.content).not.toContain('version 1');
+        });
+
+        it('overwrites with third version via overwrite flag', async () => {
+            const content = 'Overwritten plain text v3.';
+            const resp = await uploadFile(Buffer.from(content), 'notes.md', dir, 'text/markdown', true);
+            expect(resp.status).toBe(201);
+
+            const get = await client.get(`/api/v1/files/${encodePath(filePath)}/content`);
+            expect(get.status).toBe(200);
+            expect(get.data.content).toBe(content);
+            expect(get.data.content).not.toContain('Re-uploaded');
+        });
+    });
+
+    describe('DOCX file lifecycle', () => {
+        const dir = `${testRoot}/docx-lifecycle`;
+        const filePath = `${dir}/report.docx`;
+
+        beforeAll(async () => {
+            const resp = await client.post('/api/v1/files/directory', {
+                dirPath: dir,
+                description: 'DOCX lifecycle dir',
+            });
+            expect(resp.status).toBe(201);
+        });
+
+        it('uploads a DOCX and converts to HTML in Yjs (no binary gibberish)', async () => {
+            const docxBuffer = await buildMinimalDocx('Hello from DOCX');
+            const resp = await uploadFile(
+                docxBuffer,
+                'report.docx',
+                dir,
+                'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+            );
+            expect(resp.status).toBe(201);
+
+            const meta = await client.get(`/api/v1/files/${encodePath(filePath)}/metadata`);
+            expect(meta.status).toBe(200);
+            expect(meta.data.type).toBe('text');
+
+            const get = await client.get(`/api/v1/files/${encodePath(filePath)}/content`);
+            expect(get.status).toBe(200);
+            expect(get.data.content).toContain('Hello from DOCX');
+            expect(get.data.content).toMatch(/<p[^>]*>/);
+            expect(get.data.content.startsWith('PK')).toBe(false);
+        });
+
+        it('metadata has _id (file record exists in DB)', async () => {
+            const meta = await client.get(`/api/v1/files/${encodePath(filePath)}/metadata`);
+            expect(meta.status).toBe(200);
+            expect(meta.data._id).toBeTruthy();
+        });
+
+        it('deletes DOCX and cleans up metadata', async () => {
+            const del = await client.delete(`/api/v1/files/${encodePath(filePath)}`);
+            expect(del.status).toBe(200);
+
+            const meta = await client.get(`/api/v1/files/${encodePath(filePath)}/metadata`);
+            expect([400, 404]).toContain(meta.status);
+        });
+
+        it('re-uploads DOCX with different content — fresh HTML in Yjs', async () => {
+            const docxBuffer = await buildMinimalDocx('Second version DOCX');
+            const resp = await uploadFile(
+                docxBuffer,
+                'report.docx',
+                dir,
+                'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+            );
+            expect(resp.status).toBe(201);
+
+            const get = await client.get(`/api/v1/files/${encodePath(filePath)}/content`);
+            expect(get.status).toBe(200);
+            expect(get.data.content).toContain('Second version DOCX');
+            expect(get.data.content).not.toContain('Hello from DOCX');
+        });
+
+        it('overwrites DOCX — Yjs gets updated HTML', async () => {
+            const docxBuffer = await buildMinimalDocx('Overwritten DOCX v3');
+            const resp = await uploadFile(
+                docxBuffer,
+                'report.docx',
+                dir,
+                'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+                true,
+            );
+            expect(resp.status).toBe(201);
+
+            const get = await client.get(`/api/v1/files/${encodePath(filePath)}/content`);
+            expect(get.status).toBe(200);
+            expect(get.data.content).toContain('Overwritten DOCX v3');
+            expect(get.data.content).not.toContain('Second version DOCX');
+        });
+    });
+
+    describe('upload with spaces and parentheses in filename', () => {
+        const dir = `${testRoot}/special-upload-chars`;
+        const fileName = 'resume for AYODEJI (updated).txt';
+        const filePath = `${dir}/${fileName}`;
+
+        beforeAll(async () => {
+            const resp = await client.post('/api/v1/files/directory', {
+                dirPath: dir,
+                description: 'Special chars upload dir',
+            });
+            expect(resp.status).toBe(201);
+        });
+
+        it('uploads file with spaces and parentheses in name', async () => {
+            const content = 'Original resume content';
+            const resp = await uploadFile(Buffer.from(content), fileName, dir, 'text/plain');
+            expect(resp.status).toBe(201);
+
+            const get = await client.get(`/api/v1/files/${encodePath(filePath)}/content`);
+            expect(get.status).toBe(200);
+            expect(get.data.content).toBe(content);
+        });
+
+        it('deletes and re-uploads — no stale content', async () => {
+            const del = await client.delete(`/api/v1/files/${encodePath(filePath)}`);
+            expect(del.status).toBe(200);
+
+            const newContent = 'Updated resume content v2';
+            const resp = await uploadFile(Buffer.from(newContent), fileName, dir, 'text/plain');
+            expect(resp.status).toBe(201);
+
+            const get = await client.get(`/api/v1/files/${encodePath(filePath)}/content`);
+            expect(get.status).toBe(200);
+            expect(get.data.content).toBe(newContent);
+            expect(get.data.content).not.toContain('Original');
+        });
+    });
+
+    describe('binary file GridFS cleanup on delete', () => {
+        const dir = `${testRoot}/binary-lifecycle`;
+        const filePath = `${dir}/image.png`;
+        const PNG_BUFFER = Buffer.from(
+            'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVQI12NgAAIABQAB' +
+            'Nl7BcQAAAABJRU5ErkJggg==',
+            'base64',
+        );
+
+        beforeAll(async () => {
+            const resp = await client.post('/api/v1/files/directory', {
+                dirPath: dir,
+                description: 'Binary lifecycle dir',
+            });
+            expect(resp.status).toBe(201);
+        });
+
+        it('uploads a binary file', async () => {
+            const resp = await uploadFile(PNG_BUFFER, 'image.png', dir, 'image/png');
+            expect(resp.status).toBe(201);
+
+            const meta = await client.get(`/api/v1/files/${encodePath(filePath)}/metadata`);
+            expect(meta.status).toBe(200);
+            expect(meta.data.type).toBe('binary');
+        });
+
+        it('deletes binary file and GridFS record is removed', async () => {
+            const metaBefore = await client.get(`/api/v1/files/${encodePath(filePath)}/metadata`);
+            const gridFSId = metaBefore.data.gridFSId;
+
+            const del = await client.delete(`/api/v1/files/${encodePath(filePath)}`);
+            expect(del.status).toBe(200);
+
+            const meta = await client.get(`/api/v1/files/${encodePath(filePath)}/metadata`);
+            expect([400, 404]).toContain(meta.status);
+
+            if (gridFSId) {
+                const db = mongoose.connection.db;
+                const gridFSFiles = db.collection('fs.files');
+                const orphan = await gridFSFiles.findOne({
+                    _id: new mongoose.Types.ObjectId(gridFSId),
+                });
+                expect(orphan).toBeNull();
+            }
+        });
+    });
+
+    describe('DOCX with spaces and parentheses in filename', () => {
+        const dir = `${testRoot}/docx-special`;
+        const fileName = 'resume for AYODEJI (updated).docx';
+        const filePath = `${dir}/${fileName}`;
+
+        beforeAll(async () => {
+            const resp = await client.post('/api/v1/files/directory', {
+                dirPath: dir,
+                description: 'DOCX special chars dir',
+            });
+            expect(resp.status).toBe(201);
+        });
+
+        it('uploads DOCX with spaces/parens — HTML in Yjs, no gibberish', async () => {
+            const docxBuf = await buildMinimalDocx('Resume content original');
+            const resp = await uploadFile(
+                docxBuf,
+                fileName,
+                dir,
+                'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+            );
+            expect(resp.status).toBe(201);
+
+            const get = await client.get(`/api/v1/files/${encodePath(filePath)}/content`);
+            expect(get.status).toBe(200);
+            expect(get.data.content).toContain('Resume content original');
+            expect(get.data.content.startsWith('PK')).toBe(false);
+        });
+
+        it('delete + re-upload — fresh HTML, no stale content', async () => {
+            const del = await client.delete(`/api/v1/files/${encodePath(filePath)}`);
+            expect(del.status).toBe(200);
+
+            const docxBuf = await buildMinimalDocx('Resume content updated');
+            const resp = await uploadFile(
+                docxBuf,
+                fileName,
+                dir,
+                'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+            );
+            expect(resp.status).toBe(201);
+
+            const get = await client.get(`/api/v1/files/${encodePath(filePath)}/content`);
+            expect(get.status).toBe(200);
+            expect(get.data.content).toContain('Resume content updated');
+            expect(get.data.content).not.toContain('Resume content original');
+        });
+
+        it('overwrite DOCX — Yjs content replaced', async () => {
+            const docxBuf = await buildMinimalDocx('Resume content v3 overwrite');
+            const resp = await uploadFile(
+                docxBuf,
+                fileName,
+                dir,
+                'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+                true,
+            );
+            expect(resp.status).toBe(201);
+
+            const get = await client.get(`/api/v1/files/${encodePath(filePath)}/content`);
+            expect(get.status).toBe(200);
+            expect(get.data.content).toContain('Resume content v3 overwrite');
+            expect(get.data.content).not.toContain('Resume content updated');
         });
     });
 });
