@@ -1128,4 +1128,289 @@ describe('User Comprehensive Tests', () => {
             });
         });
     });
+
+    // =========================================================================
+    // FOLLOW SYSTEM TESTS
+    // =========================================================================
+    describe('User Controller - Follow System', () => {
+        let userA, userB, userC;
+
+        beforeAll(async () => {
+            userA = await testStartup.createMutableUser({ role: 'USER', firstName: 'Alice', lastName: 'Follow', prefix: 'follow_a' });
+            userB = await testStartup.createMutableUser({ role: 'USER', firstName: 'Bob', lastName: 'Follow', prefix: 'follow_b' });
+            userC = await testStartup.createMutableUser({ role: 'USER', firstName: 'Carol', lastName: 'Follow', prefix: 'follow_c' });
+        }, 30000);
+
+        const loginAs = async (mutableUser) => {
+            const response = await client.post('/api/v1/auth/login', mutableUser.credentials);
+            expect(response.status).toBe(200);
+            return response;
+        };
+
+        describe('POST /api/v1/users/:id/follow - Follow a User', () => {
+            it('should follow another user successfully', async () => {
+                await loginAs(userA);
+                const response = await client.post(`/api/v1/users/${userB.id}/follow`);
+
+                expect(response.status).toBe(200);
+                expect(response.data).toEqual({
+                    success: true,
+                    message: 'User followed successfully'
+                });
+            });
+
+            it('should be idempotent (follow again returns 200)', async () => {
+                await loginAs(userA);
+                const response = await client.post(`/api/v1/users/${userB.id}/follow`);
+
+                expect(response.status).toBe(200);
+                expect(response.data.success).toBe(true);
+            });
+
+            it('should not allow following yourself', async () => {
+                await loginAs(userA);
+                const response = await client.post(`/api/v1/users/${userA.id}/follow`);
+
+                expect(response.status).toBe(400);
+                expect(response.data.success).toBe(false);
+                expect(response.data.message).toMatch(/cannot follow yourself/i);
+            });
+
+            it('should return 404 for non-existent user', async () => {
+                await loginAs(userA);
+                const fakeId = '000000000000000000000000';
+                const response = await client.post(`/api/v1/users/${fakeId}/follow`);
+
+                expect(response.status).toBe(404);
+                expect(response.data.success).toBe(false);
+            });
+
+            it('should require authentication', async () => {
+                client.clearCookies();
+                const response = await client.post(`/api/v1/users/${userB.id}/follow`);
+
+                expect(response.status).toBe(401);
+                expect(response.data.success).toBe(false);
+            });
+        });
+
+        describe('GET /api/v1/users/:id/following - Get Following', () => {
+            it('should return list of users being followed', async () => {
+                await loginAs(userA);
+                const response = await client.get(`/api/v1/users/${userA.id}/following`);
+
+                expect(response.status).toBe(200);
+                expect(response.data.success).toBe(true);
+                expect(Array.isArray(response.data.data)).toBe(true);
+                expect(response.data.pagination).toBeDefined();
+                expect(response.data.pagination).toHaveProperty('page');
+                expect(response.data.pagination).toHaveProperty('limit');
+                expect(response.data.pagination).toHaveProperty('total');
+                expect(response.data.pagination).toHaveProperty('pages');
+
+                const ids = response.data.data.map(u => u._id || u.id);
+                expect(ids).toContain(userB.id);
+            });
+
+            it('should return populated user objects', async () => {
+                await loginAs(userA);
+                const response = await client.get(`/api/v1/users/${userA.id}/following`);
+
+                if (response.data.data.length > 0) {
+                    const followed = response.data.data[0];
+                    expect(followed).toHaveProperty('firstName');
+                    expect(followed).toHaveProperty('lastName');
+                    expect(followed).toHaveProperty('username');
+                }
+            });
+
+            it('should support pagination', async () => {
+                await loginAs(userA);
+                const response = await client.get(`/api/v1/users/${userA.id}/following?page=1&limit=1`);
+
+                expect(response.status).toBe(200);
+                expect(response.data.pagination.page).toBe(1);
+                expect(response.data.pagination.limit).toBe(1);
+            });
+
+            it('should return empty for user with no follows', async () => {
+                await loginAs(userA);
+                const response = await client.get(`/api/v1/users/${userC.id}/following`);
+
+                expect(response.status).toBe(200);
+                expect(response.data.data).toEqual([]);
+                expect(response.data.pagination.total).toBe(0);
+            });
+        });
+
+        describe('GET /api/v1/users/:id/followers - Get Followers', () => {
+            it('should return followers of a user', async () => {
+                await loginAs(userA);
+                const response = await client.get(`/api/v1/users/${userB.id}/followers`);
+
+                expect(response.status).toBe(200);
+                expect(response.data.success).toBe(true);
+                expect(Array.isArray(response.data.data)).toBe(true);
+                expect(response.data.pagination).toBeDefined();
+
+                const ids = response.data.data.map(u => u._id || u.id);
+                expect(ids).toContain(userA.id);
+            });
+
+            it('should return empty for user with no followers', async () => {
+                await loginAs(userA);
+                const response = await client.get(`/api/v1/users/${userC.id}/followers`);
+
+                expect(response.status).toBe(200);
+                expect(response.data.data).toEqual([]);
+            });
+        });
+
+        describe('GET /api/v1/users/:id/follow-counts - Get Follow Counts', () => {
+            it('should return follow counts', async () => {
+                await loginAs(userA);
+                const response = await client.get(`/api/v1/users/${userA.id}/follow-counts`);
+
+                expect(response.status).toBe(200);
+                expect(response.data).toEqual({
+                    success: true,
+                    data: {
+                        followingCount: expect.any(Number),
+                        followerCount: expect.any(Number)
+                    }
+                });
+                expect(response.data.data.followingCount).toBeGreaterThanOrEqual(1);
+            });
+
+            it('should return zero counts for new user', async () => {
+                await loginAs(userA);
+                const response = await client.get(`/api/v1/users/${userC.id}/follow-counts`);
+
+                expect(response.status).toBe(200);
+                expect(response.data.data.followingCount).toBe(0);
+                expect(response.data.data.followerCount).toBe(0);
+            });
+        });
+
+        describe('GET /api/v1/users/:id/follow-status - Check Follow Status', () => {
+            it('should report isFollowing=true when current user follows target', async () => {
+                await loginAs(userA);
+                const response = await client.get(`/api/v1/users/${userB.id}/follow-status`);
+
+                expect(response.status).toBe(200);
+                expect(response.data).toEqual({
+                    success: true,
+                    data: {
+                        isFollowing: true,
+                        isFollowedBy: false,
+                        isMutual: false
+                    }
+                });
+            });
+
+            it('should report isFollowedBy=true when target follows current user', async () => {
+                await loginAs(userB);
+                const response = await client.get(`/api/v1/users/${userA.id}/follow-status`);
+
+                expect(response.status).toBe(200);
+                expect(response.data.data.isFollowing).toBe(false);
+                expect(response.data.data.isFollowedBy).toBe(true);
+            });
+
+            it('should detect mutual follows', async () => {
+                await loginAs(userB);
+                await client.post(`/api/v1/users/${userA.id}/follow`);
+
+                const response = await client.get(`/api/v1/users/${userA.id}/follow-status`);
+
+                expect(response.status).toBe(200);
+                expect(response.data.data).toEqual({
+                    isFollowing: true,
+                    isFollowedBy: true,
+                    isMutual: true
+                });
+            });
+
+            it('should report all false for unrelated users', async () => {
+                await loginAs(userC);
+                const response = await client.get(`/api/v1/users/${userA.id}/follow-status`);
+
+                expect(response.status).toBe(200);
+                expect(response.data.data).toEqual({
+                    isFollowing: false,
+                    isFollowedBy: false,
+                    isMutual: false
+                });
+            });
+        });
+
+        describe('GET /api/v1/users/mutuals - Get Mutuals', () => {
+            it('should return mutual follows for the current user', async () => {
+                await loginAs(userA);
+                const response = await client.get('/api/v1/users/mutuals');
+
+                expect(response.status).toBe(200);
+                expect(response.data.success).toBe(true);
+                expect(Array.isArray(response.data.data)).toBe(true);
+                expect(response.data.pagination).toBeDefined();
+
+                const ids = response.data.data.map(u => u._id || u.id);
+                expect(ids).toContain(userB.id);
+            });
+
+            it('should return empty for user with no mutuals', async () => {
+                await loginAs(userC);
+                const response = await client.get('/api/v1/users/mutuals');
+
+                expect(response.status).toBe(200);
+                expect(response.data.data).toEqual([]);
+            });
+
+            it('should support pagination', async () => {
+                await loginAs(userA);
+                const response = await client.get('/api/v1/users/mutuals?page=1&limit=10');
+
+                expect(response.status).toBe(200);
+                expect(response.data.pagination.page).toBe(1);
+                expect(response.data.pagination.limit).toBe(10);
+            });
+        });
+
+        describe('DELETE /api/v1/users/:id/follow - Unfollow a User', () => {
+            it('should unfollow a user successfully', async () => {
+                await loginAs(userA);
+                const response = await client.delete(`/api/v1/users/${userB.id}/follow`);
+
+                expect(response.status).toBe(200);
+                expect(response.data).toEqual({
+                    success: true,
+                    message: 'User unfollowed successfully'
+                });
+            });
+
+            it('should return 400 when not following the user', async () => {
+                await loginAs(userA);
+                const response = await client.delete(`/api/v1/users/${userB.id}/follow`);
+
+                expect(response.status).toBe(400);
+                expect(response.data.success).toBe(false);
+                expect(response.data.message).toMatch(/not following/i);
+            });
+
+            it('should require authentication', async () => {
+                client.clearCookies();
+                const response = await client.delete(`/api/v1/users/${userB.id}/follow`);
+
+                expect(response.status).toBe(401);
+            });
+
+            it('should reflect in follow counts after unfollow', async () => {
+                await loginAs(userA);
+                const response = await client.get(`/api/v1/users/${userA.id}/follow-counts`);
+
+                expect(response.status).toBe(200);
+                expect(response.data.data.followingCount).toBe(0);
+            });
+        });
+    });
 });
