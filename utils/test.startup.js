@@ -10,8 +10,8 @@ import dotenv from 'dotenv';
 import mongoose from 'mongoose';
 import bcrypt from 'bcryptjs';
 import ApiClient from './api.client.js';
-import { Server } from '../../server/server.js';
-import User from '../../server/models/user.model.js';
+import { Server } from '../../file-server/server.js';
+import User from '../../file-server/models/user.model.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -43,7 +43,7 @@ class TestStartup {
      * Generate unique database name for this test file
      */
     generateDbName() {
-        const baseDbName = process.env.MONGODB_URI?.split('/').pop()?.split('?')[0] || 'app-base-test-db';
+        const baseDbName = process.env.MONGODB_URI?.split('/').pop()?.split('?')[0] || 'filesystem-one-test-db';
         return `${baseDbName}-${this.testIdentifier}`;
     }
 

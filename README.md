@@ -1,8 +1,8 @@
-# App Base Test Suite
+# FilesystemOne — Test Suite
 
 > **Integration Testing Infrastructure with Vitest**
 
-Comprehensive integration test suite using **Vitest** for fast, parallel test execution. Tests the complete backend API with real MongoDB and Redis instances.
+Comprehensive integration test suite using **Vitest** for fast, parallel test execution. Tests the complete FilesystemOne backend API with real MongoDB and Redis instances.
 
 ## 🚀 Quick Start
 
@@ -163,7 +163,7 @@ await testStartup.cleanCollections(['users', 'files']);  // Specific collections
 
 1. **Copy the example configuration**:
    ```bash
-   cd tests
+   cd filesystem-one/file-tests
    cp .env.test.example .env.test
    ```
 
@@ -331,7 +331,7 @@ This approach provides true integration testing rather than mocked unit tests.
 
 ```bash
 # Ensure MongoDB is running
-mongosh mongodb://localhost:27017/app-base-test-db
+mongosh mongodb://localhost:27017/filesystem-one-test-db
 
 # Ensure Redis is running (if cache enabled)
 redis-cli ping
