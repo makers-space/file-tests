@@ -1,7 +1,7 @@
 {
-  "name": "app-base-tests",
+  "name": "filesystem-one-tests",
   "version": "1.0.0",
-  "description": "Test suite for App Base API",
+  "description": "FilesystemOne — Test Suite",
   "type": "module",
   "scripts": {
     "test": "vitest run",
