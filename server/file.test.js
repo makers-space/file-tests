@@ -17,9 +17,9 @@ describe('File Routes - HTTP API', () => {
     let client;
     let regularUser;
 
-    const testRoot = `/tests-http-${Date.now()}`;
-    let currentFilePath = `${testRoot}/docs/sample.txt`;
-    let publishedVersionNumber;
+    let testRoot;
+    let currentFilePath;
+    let savedVersionNumber;
     let copiedFilePath;
 
     beforeAll(async () => {
@@ -30,6 +30,8 @@ describe('File Routes - HTTP API', () => {
         console.log('File tests initialized on port:', testStartup.port, 'DB:', testStartup.dbName);
 
         await testStartup.loginAsUser('creator');
+        testRoot = `/${testStartup.creator.username}/tests-http-${Date.now()}`;
+        currentFilePath = `${testRoot}/docs/sample.txt`;
 
         const rootResponse = await client.post('/api/v1/files/directory', {
             dirPath: testRoot,
@@ -44,6 +46,12 @@ describe('File Routes - HTTP API', () => {
         });
         expect(docsDirResponse.status).toBe(201);
         expect(docsDirResponse.data.success).toBe(true);
+
+        // Establish a connection between creator and regularUser so sharing is allowed
+        await client.post(`/api/v1/users/${regularUser.id}/connect`);
+        await testStartup.loginAsUser('user');
+        await client.put(`/api/v1/users/${testStartup.creator.id}/connect`, { action: 'accept' });
+        await testStartup.loginAsUser('creator');
     }, 120000);
 
     afterAll(async () => {
@@ -228,7 +236,7 @@ describe('File Routes - HTTP API', () => {
             expect(typeof content).toBe('string');
         });
 
-        test('validates HTTP content updates are rejected but version publishing works', async () => {
+        test('validates HTTP content updates are rejected but version saving works', async () => {
             // Test that HTTP content updates are correctly rejected for text files
             const saveResponse = await client.put(`/api/v1/files/${encodePath(currentFilePath)}/content`, {
                 content: 'Updated HTTP content'
@@ -237,24 +245,24 @@ describe('File Routes - HTTP API', () => {
             expect(saveResponse.data.success).toBe(false);
             expect(saveResponse.data.message).toContain('Text files cannot be saved via HTTP API');
 
-            // However, version publishing should work - it reads from Yjs and stores snapshot in GridFS
-            const publishResponse = await client.post(`/api/v1/files/${encodePath(currentFilePath)}/publish`, {
-                message: 'Published version from Yjs content'
+            // However, version saving should work - it reads from Yjs and stores snapshot in GridFS
+            const saveVersionResponse = await client.post(`/api/v1/files/${encodePath(currentFilePath)}/versions`, {
+                message: 'Version saved from Yjs content'
             });
-            expect([200, 201]).toContain(publishResponse.status);
-            expect(publishResponse.data.success).toBe(true);
-            publishedVersionNumber = publishResponse.data.versionNumber;
-            expect(typeof publishedVersionNumber).toBe('number');
+            expect([200, 201]).toContain(saveVersionResponse.status);
+            expect(saveVersionResponse.data.success).toBe(true);
+            savedVersionNumber = saveVersionResponse.data.versionNumber;
+            expect(typeof savedVersionNumber).toBe('number');
             
-            console.log('✅ HTTP content update correctly rejected, but version publishing works - clean architecture!');
+            console.log('✅ HTTP content update correctly rejected, but version saving works - clean architecture!');
         });
 
-        test('loads published version without altering current content', async () => {
+        test('loads saved version without altering current content', async () => {
             // Test that version loading works (reads versioned content from GridFS)
-            const loadResponse = await client.get(`/api/v1/files/${encodePath(currentFilePath)}/versions/${publishedVersionNumber}`);
+            const loadResponse = await client.get(`/api/v1/files/${encodePath(currentFilePath)}/versions/${savedVersionNumber}`);
             expect(loadResponse.status).toBe(200);
             expect(loadResponse.data.success).toBe(true);
-            expect(loadResponse.data.versionNumber).toBe(publishedVersionNumber);
+            expect(loadResponse.data.versionNumber).toBe(savedVersionNumber);
             expect(typeof loadResponse.data.content).toBe('string');
             expect(loadResponse.data.readOnly).toBe(true);
             
@@ -295,9 +303,9 @@ describe('File Routes - HTTP API', () => {
             // HTTP API focuses on metadata management for text files
         });
 
-        test('deletes the published version entry', async () => {
+        test('deletes the saved version entry', async () => {
             // Test that version deletion works (removes from GridFS)
-            const deleteVersionResponse = await client.delete(`/api/v1/files/${encodePath(currentFilePath)}/versions/${publishedVersionNumber}`);
+            const deleteVersionResponse = await client.delete(`/api/v1/files/${encodePath(currentFilePath)}/versions/${savedVersionNumber}`);
             expect(deleteVersionResponse.status).toBe(200);
             expect(deleteVersionResponse.data.success).toBe(true);
 
@@ -306,9 +314,9 @@ describe('File Routes - HTTP API', () => {
             expect(versionsResponse.status).toBe(200);
             const versions = versionsResponse.data.versions || [];
             const versionNumbers = versions.map((version) => version.version || version.versionNumber);
-            expect(versionNumbers).not.toContain(publishedVersionNumber);
+            expect(versionNumbers).not.toContain(savedVersionNumber);
             
-            console.log('✅ Version operations work correctly - published and deleted from GridFS');
+            console.log('✅ Version operations work correctly - saved and deleted from GridFS');
         });
 
         test('validates array-index-based versioning with sequential numbering', async () => {
@@ -316,8 +324,8 @@ describe('File Routes - HTTP API', () => {
             const versionTestFile = `${testRoot}/docs/array-version-test.txt`;
             await createFile(versionTestFile, 'Initial content', 'Array version test file');
 
-            // Publish version 1 (will be at index 0)
-            const version1Response = await client.post(`/api/v1/files/${encodePath(versionTestFile)}/publish`, {
+            // Save version 1 (will be at index 0)
+            const version1Response = await client.post(`/api/v1/files/${encodePath(versionTestFile)}/versions`, {
                 message: 'First version'
             });
             expect(version1Response.status).toBe(201);
@@ -327,8 +335,8 @@ describe('File Routes - HTTP API', () => {
             // Wait a moment to ensure different timestamps
             await new Promise(resolve => setTimeout(resolve, 100));
 
-            // Publish version 2 (will be at index 1)
-            const version2Response = await client.post(`/api/v1/files/${encodePath(versionTestFile)}/publish`, {
+            // Save version 2 (will be at index 1)
+            const version2Response = await client.post(`/api/v1/files/${encodePath(versionTestFile)}/versions`, {
                 message: 'Second version'
             });
             expect(version2Response.status).toBe(201);
@@ -338,8 +346,8 @@ describe('File Routes - HTTP API', () => {
             // Wait a moment to ensure different timestamps
             await new Promise(resolve => setTimeout(resolve, 100));
 
-            // Publish version 3 (will be at index 2)
-            const version3Response = await client.post(`/api/v1/files/${encodePath(versionTestFile)}/publish`, {
+            // Save version 3 (will be at index 2)
+            const version3Response = await client.post(`/api/v1/files/${encodePath(versionTestFile)}/versions`, {
                 message: 'Third version'
             });
             expect(version3Response.status).toBe(201);
@@ -390,7 +398,7 @@ describe('File Routes - HTTP API', () => {
             expect(remainingVersions.map(v => v.message)).not.toContain('Second version');
 
             // Test that version numbers continue sequentially even after deletion
-            const version4Response = await client.post(`/api/v1/files/${encodePath(versionTestFile)}/publish`, {
+            const version4Response = await client.post(`/api/v1/files/${encodePath(versionTestFile)}/versions`, {
                 message: 'Fourth version after deletion'
             });
             expect(version4Response.status).toBe(201);
@@ -416,11 +424,11 @@ describe('File Routes - HTTP API', () => {
             const latestVersionTestFile = `${testRoot}/docs/latest-version-test.txt`;
             await createFile(latestVersionTestFile, 'Test content', 'Latest version test');
 
-            // Publish a version
-            const publishResponse = await client.post(`/api/v1/files/${encodePath(latestVersionTestFile)}/publish`, {
+            // Save a version
+            const saveVersionResponse = await client.post(`/api/v1/files/${encodePath(latestVersionTestFile)}/versions`, {
                 message: 'Only version'
             });
-            expect(publishResponse.status).toBe(201);
+            expect(saveVersionResponse.status).toBe(201);
 
             // Delete the latest version (version 1) - should now succeed
             const deleteResponse = await client.delete(`/api/v1/files/${encodePath(latestVersionTestFile)}/versions/1`);
@@ -439,11 +447,14 @@ describe('File Routes - HTTP API', () => {
     });
 
     describe('Move and copy operations', () => {
-        const copyDestination = `${testRoot}/copies`;
-        const archiveDestination = `${testRoot}/archive`;
-        let testFilePath = `${testRoot}/docs/sample.txt`;
+        let copyDestination;
+        let archiveDestination;
+        let testFilePath;
 
         beforeAll(async () => {
+            copyDestination = `${testRoot}/copies`;
+            archiveDestination = `${testRoot}/archive`;
+            testFilePath = `${testRoot}/docs/sample.txt`;
             await testStartup.loginAsUser('creator');
             
             // Create the test file needed for copy/move operations
@@ -469,7 +480,7 @@ describe('File Routes - HTTP API', () => {
             // Copy the test file
             const copyResponse = await client.post('/api/v1/files/copy', {
                 sourcePath: currentFilePath,
-                destinationPath: copyDestination
+                destinationPath: `${copyDestination}/sample.txt`
             });
             expect(copyResponse.status).toBe(201);
             expect(copyResponse.data.success).toBe(true);
@@ -488,7 +499,7 @@ describe('File Routes - HTTP API', () => {
             
             const moveResponse = await client.post('/api/v1/files/move', {
                 sourcePath: currentFilePath,
-                destinationPath: archiveDestination
+                destinationPath: `${archiveDestination}/sample.txt`
             });
             expect(moveResponse.status).toBe(200);
             expect(moveResponse.data.success).toBe(true);
@@ -503,11 +514,12 @@ describe('File Routes - HTTP API', () => {
     });
 
     describe('Yjs WebSocket Integration', () => {
-        const yjsTestDir = `${testRoot}/yjs-validation`;
+        let yjsTestDir;
         let yjsTestFile1;
         let yjsTestFile2;
 
         beforeAll(async () => {
+            yjsTestDir = `${testRoot}/yjs-validation`;
             await testStartup.loginAsUser('creator');
 
             // Create test directory
@@ -640,7 +652,7 @@ describe('File Routes - HTTP API', () => {
             // Move the file
             const moveResponse = await client.post('/api/v1/files/move', {
                 sourcePath: originalPath,
-                destinationPath: moveDestinationDir
+                destinationPath: finalPath
             });
             expect(moveResponse.status).toBe(200);
             expect(moveResponse.data.success).toBe(true);
@@ -862,7 +874,7 @@ describe('File Routes - HTTP API', () => {
             const copiedFilePath = `${copyDestDir}/source-file.txt`;
             const copyResponse = await client.post('/api/v1/files/copy', {
                 sourcePath: sourceFilePath,
-                destinationPath: copyDestDir
+                destinationPath: copiedFilePath
             });
             
             expect(copyResponse.status).toBe(201);
@@ -933,11 +945,14 @@ describe('File Routes - HTTP API', () => {
     });
 
     describe('Rename edge cases', () => {
-        const renameEdgeDir = `${testRoot}/rename-edge`;
-        const renameSourcePath = `${renameEdgeDir}/edge-source.txt`;
-        const renameTargetPath = `${renameEdgeDir}/edge-target.txt`;
+        let renameEdgeDir;
+        let renameSourcePath;
+        let renameTargetPath;
 
         beforeAll(async () => {
+            renameEdgeDir = `${testRoot}/rename-edge`;
+            renameSourcePath = `${renameEdgeDir}/edge-source.txt`;
+            renameTargetPath = `${renameEdgeDir}/edge-target.txt`;
             await testStartup.loginAsUser('creator');
 
             const dirResponse = await client.post('/api/v1/files/directory', {
@@ -986,9 +1001,10 @@ describe('File Routes - HTTP API', () => {
     });
 
     describe('Uploads and listings', () => {
-        const uploadDir = `${testRoot}/uploads`;
+        let uploadDir;
 
         beforeAll(async () => {
+            uploadDir = `${testRoot}/uploads`;
             await testStartup.loginAsUser('creator');
             const uploadDirResponse = await client.post('/api/v1/files/directory', {
                 dirPath: uploadDir,
@@ -1100,12 +1116,16 @@ describe('File Routes - HTTP API', () => {
     });
 
     describe('Bulk operation edge cases', () => {
-        const bulkDir = `${testRoot}/bulk`;
-        const tagFilePath = `${bulkDir}/taggable.txt`;
-        const permissionFilePath = `${bulkDir}/permission.txt`;
-        const mixedFilePath = `${bulkDir}/mixed-delete.txt`;
+        let bulkDir;
+        let tagFilePath;
+        let permissionFilePath;
+        let mixedFilePath;
 
         beforeAll(async () => {
+            bulkDir = `${testRoot}/bulk`;
+            tagFilePath = `${bulkDir}/taggable.txt`;
+            permissionFilePath = `${bulkDir}/permission.txt`;
+            mixedFilePath = `${bulkDir}/mixed-delete.txt`;
             await testStartup.loginAsUser('creator');
 
             const dirResponse = await client.post('/api/v1/files/directory', {
@@ -1356,13 +1376,18 @@ describe('File Routes - HTTP API', () => {
     });
 
     describe('File Statistics - Comprehensive Testing', () => {
-        const statsTestRoot = `/stats-test-${Date.now()}`;
-        const textFilesDir = `${statsTestRoot}/text-files`;
-        const binaryFilesDir = `${statsTestRoot}/binary-files`;
-        const emptyDir = `${statsTestRoot}/empty`;
-        const nestedDir = `${statsTestRoot}/nested/deep/structure`;
+        let statsTestRoot;
+        let textFilesDir;
+        let binaryFilesDir;
+        let emptyDir;
+        let nestedDir;
 
         beforeAll(async () => {
+            statsTestRoot = `/${testStartup.admin.username}/stats-test-${Date.now()}`;
+            textFilesDir = `${statsTestRoot}/text-files`;
+            binaryFilesDir = `${statsTestRoot}/binary-files`;
+            emptyDir = `${statsTestRoot}/empty`;
+            nestedDir = `${statsTestRoot}/nested/deep/structure`;
             // Use admin user to create test structure so it's accessible
             await testStartup.loginAsUser('admin');
             await createStatsTestStructure();
@@ -1670,6 +1695,165 @@ describe('File Routes - HTTP API', () => {
                 expect(response.data.message).toMatch(/not found/i);
             });
         });
+
+        describe('Version size inclusion in storage totals', () => {
+            let versionStatsDir;
+            let versionStatsFilePath;
+
+            beforeAll(async () => {
+                await testStartup.loginAsUser('admin');
+                versionStatsDir = `${statsTestRoot}/version-size-check`;
+                versionStatsFilePath = `${versionStatsDir}/versioned.txt`;
+
+                await client.post('/api/v1/files/directory', {
+                    dirPath: versionStatsDir,
+                    description: 'Directory for version-size stats tests'
+                });
+                await client.post('/api/v1/files', {
+                    filePath: versionStatsFilePath,
+                    content: 'Initial content for version size testing',
+                    description: 'File used to verify version sizes appear in stats'
+                });
+            }, 30000);
+
+            test('file/stats totalSize grows after saving a version', async () => {
+                await testStartup.loginAsUser('admin');
+
+                // Flush cache so we read fresh data from the database
+                await client.delete('/api/v1/cache');
+
+                // Capture baseline stats before saving any version
+                const beforeRes = await client.get('/api/v1/files/stats');
+                expect(beforeRes.status).toBe(200);
+                const sizeBefore = beforeRes.data.totalSize;
+
+                // Save a version — the snapshot captures the current file content
+                const saveVersionRes = await client.post(
+                    `/api/v1/files/${encodePath(versionStatsFilePath)}/versions`,
+                    { message: 'Stats test version' }
+                );
+                expect([200, 201]).toContain(saveVersionRes.status);
+                expect(saveVersionRes.data.success).toBe(true);
+                expect(saveVersionRes.data.versionNumber).toBeGreaterThan(0);
+
+                // Flush cache so the after-read reflects the newly saved version
+                await client.delete('/api/v1/cache');
+
+                // Stats must now be higher — version content counts towards total
+                const afterRes = await client.get('/api/v1/files/stats');
+                expect(afterRes.status).toBe(200);
+                expect(afterRes.data.totalSize).toBeGreaterThan(sizeBefore);
+            });
+
+            test('directory/stats totalSize includes saved version sizes', async () => {
+                await testStartup.loginAsUser('admin');
+                await client.delete('/api/v1/cache');
+
+                // Snapshot directory stats before an additional version
+                const beforeDirRes = await client.get(
+                    `/api/v1/files/directory/stats?filePath=${encodePath(versionStatsDir)}`
+                );
+                expect(beforeDirRes.status).toBe(200);
+                const dirSizeBefore = beforeDirRes.data.totalSize;
+
+                // Save another version
+                const saveVersionRes = await client.post(
+                    `/api/v1/files/${encodePath(versionStatsFilePath)}/versions`,
+                    { message: 'Directory stats test version' }
+                );
+                expect([200, 201]).toContain(saveVersionRes.status);
+
+                // Flush cache so the after-read reflects the newly saved version
+                await client.delete('/api/v1/cache');
+
+                // Directory stats must now be higher
+                const afterDirRes = await client.get(
+                    `/api/v1/files/directory/stats?filePath=${encodePath(versionStatsDir)}`
+                );
+                expect(afterDirRes.status).toBe(200);
+                expect(afterDirRes.data.totalSize).toBeGreaterThan(dirSizeBefore);
+            });
+
+            test('file metadata size includes saved version sizes', async () => {
+                await testStartup.loginAsUser('admin');
+                await client.delete('/api/v1/cache');
+
+                // Get metadata to read the reported size (base only, no versions yet on a fresh file)
+                const metaBefore = await client.get(
+                    `/api/v1/files/${encodePath(versionStatsFilePath)}/metadata`
+                );
+                expect(metaBefore.status).toBe(200);
+                const sizeBefore = metaBefore.data.size ?? metaBefore.data.info?.size ?? 0;
+
+                // Save a version
+                const saveVersionRes = await client.post(
+                    `/api/v1/files/${encodePath(versionStatsFilePath)}/versions`,
+                    { message: 'Metadata size test version' }
+                );
+                expect([200, 201]).toContain(saveVersionRes.status);
+
+                // Metadata size must include version storage
+                const metaAfter = await client.get(
+                    `/api/v1/files/${encodePath(versionStatsFilePath)}/metadata`
+                );
+                expect(metaAfter.status).toBe(200);
+                const sizeAfter = metaAfter.data.size ?? metaAfter.data.info?.size ?? 0;
+                expect(sizeAfter).toBeGreaterThan(sizeBefore);
+            });
+
+            test('user stats totalStorage includes saved version sizes', async () => {
+                await testStartup.loginAsUser('admin');
+                await client.delete('/api/v1/cache');
+                const userId = testStartup.admin.id;
+
+                // Get user stats before another version
+                const beforeUserRes = await client.get(`/api/v1/users/${userId}/stats`);
+                expect(beforeUserRes.status).toBe(200);
+                const storageBefore = beforeUserRes.data.stats?.files?.totalStorage ?? 0;
+
+                // Save another version
+                const saveVersionRes = await client.post(
+                    `/api/v1/files/${encodePath(versionStatsFilePath)}/versions`,
+                    { message: 'User stats test version' }
+                );
+                expect([200, 201]).toContain(saveVersionRes.status);
+
+                // Flush cache so the after-read reflects the newly saved version
+                await client.delete('/api/v1/cache');
+
+                // User stats must reflect the additional version storage
+                const afterUserRes = await client.get(`/api/v1/users/${userId}/stats`);
+                expect(afterUserRes.status).toBe(200);
+                const storageAfter = afterUserRes.data.stats?.files?.totalStorage ?? 0;
+                expect(storageAfter).toBeGreaterThan(storageBefore);
+            });
+
+            test('totalSize across all stat endpoints is consistent', async () => {
+                await testStartup.loginAsUser('admin');
+                await client.delete('/api/v1/cache');
+                const userId = testStartup.admin.id;
+
+                const [fileStatsRes, adminStatsRes, userStatsRes] = await Promise.all([
+                    client.get('/api/v1/files/stats'),
+                    client.get('/api/v1/files/admin/stats'),
+                    client.get(`/api/v1/users/${userId}/stats`)
+                ]);
+
+                expect(fileStatsRes.status).toBe(200);
+                expect(adminStatsRes.status).toBe(200);
+                expect(userStatsRes.status).toBe(200);
+
+                // /files/stats and /files/admin/stats must agree
+                expect(fileStatsRes.data.totalSize).toBe(adminStatsRes.data.totalSize);
+
+                // All reported totals must be positive (versions exist at this point)
+                expect(fileStatsRes.data.totalSize).toBeGreaterThan(0);
+
+                const userTotal = userStatsRes.data.stats?.files?.totalStorage ?? 0;
+                // User's own total must be a subset of (≤) the system-wide total
+                expect(userTotal).toBeLessThanOrEqual(fileStatsRes.data.totalSize);
+            });
+        });
     });
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -1677,9 +1861,11 @@ describe('File Routes - HTTP API', () => {
     // ─────────────────────────────────────────────────────────────────────────
 
     describe('basePath routing', () => {
-        const subDir = `${testRoot}/basepath-custom-dir`;
+        let subDir;
 
         beforeAll(async () => {
+            subDir = `${testRoot}/basepath-custom-dir`;
+            await testStartup.loginAsUser('creator');
             const resp = await client.post('/api/v1/files/directory', {
                 dirPath: subDir,
                 description: 'Custom upload dir',
@@ -1700,10 +1886,13 @@ describe('File Routes - HTTP API', () => {
     });
 
     describe('plain text file lifecycle', () => {
-        const dir = `${testRoot}/text-lifecycle`;
-        const filePath = `${dir}/notes.md`;
+        let dir;
+        let filePath;
 
         beforeAll(async () => {
+            dir = `${testRoot}/text-lifecycle`;
+            filePath = `${dir}/notes.md`;
+            await testStartup.loginAsUser('creator');
             const resp = await client.post('/api/v1/files/directory', {
                 dirPath: dir,
                 description: 'Text lifecycle dir',
@@ -1753,10 +1942,13 @@ describe('File Routes - HTTP API', () => {
     });
 
     describe('DOCX file lifecycle', () => {
-        const dir = `${testRoot}/docx-lifecycle`;
-        const filePath = `${dir}/report.docx`;
+        let dir;
+        let filePath;
 
         beforeAll(async () => {
+            dir = `${testRoot}/docx-lifecycle`;
+            filePath = `${dir}/report.docx`;
+            await testStartup.loginAsUser('creator');
             const resp = await client.post('/api/v1/files/directory', {
                 dirPath: dir,
                 description: 'DOCX lifecycle dir',
@@ -1834,11 +2026,14 @@ describe('File Routes - HTTP API', () => {
     });
 
     describe('upload with spaces and parentheses in filename', () => {
-        const dir = `${testRoot}/special-upload-chars`;
+        let dir;
         const fileName = 'resume for AYODEJI (updated).txt';
-        const filePath = `${dir}/${fileName}`;
+        let filePath;
 
         beforeAll(async () => {
+            dir = `${testRoot}/special-upload-chars`;
+            filePath = `${dir}/${fileName}`;
+            await testStartup.loginAsUser('creator');
             const resp = await client.post('/api/v1/files/directory', {
                 dirPath: dir,
                 description: 'Special chars upload dir',
@@ -1872,8 +2067,8 @@ describe('File Routes - HTTP API', () => {
     });
 
     describe('binary file GridFS cleanup on delete', () => {
-        const dir = `${testRoot}/binary-lifecycle`;
-        const filePath = `${dir}/image.png`;
+        let dir;
+        let filePath;
         const PNG_BUFFER = Buffer.from(
             'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVQI12NgAAIABQAB' +
             'Nl7BcQAAAABJRU5ErkJggg==',
@@ -1881,6 +2076,9 @@ describe('File Routes - HTTP API', () => {
         );
 
         beforeAll(async () => {
+            dir = `${testRoot}/binary-lifecycle`;
+            filePath = `${dir}/image.png`;
+            await testStartup.loginAsUser('creator');
             const resp = await client.post('/api/v1/files/directory', {
                 dirPath: dir,
                 description: 'Binary lifecycle dir',
@@ -1919,11 +2117,14 @@ describe('File Routes - HTTP API', () => {
     });
 
     describe('DOCX with spaces and parentheses in filename', () => {
-        const dir = `${testRoot}/docx-special`;
+        let dir;
         const fileName = 'resume for AYODEJI (updated).docx';
-        const filePath = `${dir}/${fileName}`;
+        let filePath;
 
         beforeAll(async () => {
+            dir = `${testRoot}/docx-special`;
+            filePath = `${dir}/${fileName}`;
+            await testStartup.loginAsUser('creator');
             const resp = await client.post('/api/v1/files/directory', {
                 dirPath: dir,
                 description: 'DOCX special chars dir',
@@ -1982,6 +2183,950 @@ describe('File Routes - HTTP API', () => {
             expect(get.data.content).toContain('Resume content v3 overwrite');
             expect(get.data.content).not.toContain('Resume content updated');
         });
+    });
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Permission propagation and cleanup on share / unshare
+    // ─────────────────────────────────────────────────────────────────────────
+
+    describe('Permission propagation and cleanup', () => {
+        let permRoot;
+        let nestedDir;
+        let fileA;
+        let fileB;
+
+        beforeAll(async () => {
+            permRoot = `${testRoot}/perm-test`;
+            nestedDir = `${permRoot}/level1/level2`;
+            fileA = `${nestedDir}/a.txt`;
+            fileB = `${nestedDir}/b.txt`;
+            // Connection already established in top-level beforeAll
+            await testStartup.loginAsUser('creator');
+
+            await client.post('/api/v1/files/directory', { dirPath: permRoot, description: 'perm test root' });
+            await client.post('/api/v1/files/directory', { dirPath: `${permRoot}/level1`, description: 'level 1' });
+            await client.post('/api/v1/files/directory', { dirPath: nestedDir, description: 'level 2' });
+
+            await createFile(fileA, 'File A content', 'Perm test file A');
+            await createFile(fileB, 'File B content', 'Perm test file B');
+        });
+
+        /** Helper: fetch permissions.read array for a given path */
+        const getReadPermissions = async (filePath) => {
+            const res = await client.get(`/api/v1/files/${encodePath(filePath)}/metadata`);
+            expect(res.status).toBe(200);
+            const meta = res.data.metadata || res.data;
+            return (meta.permissions?.read || []).map(u => (typeof u === 'object' ? u._id || u.id : u).toString());
+        };
+
+        test('sharing a file propagates read permission to all ancestor directories', async () => {
+            const shareRes = await client.post(`/api/v1/files/${encodePath(fileA)}/share`, {
+                userIds: [regularUser.id],
+                permission: 'read'
+            });
+            expect(shareRes.status).toBe(200);
+
+            // Ancestors should now include regularUser in their read permissions
+            const nestedDirReaders = await getReadPermissions(nestedDir);
+            const level1Readers = await getReadPermissions(`${permRoot}/level1`);
+            const rootReaders = await getReadPermissions(permRoot);
+
+            expect(nestedDirReaders).toContain(regularUser.id);
+            expect(level1Readers).toContain(regularUser.id);
+            expect(rootReaders).toContain(regularUser.id);
+        });
+
+        test('unsharing the only shared file cleans up parent read permissions', async () => {
+            const unshareRes = await client.delete(`/api/v1/files/${encodePath(fileA)}/share`, {
+                data: { userIds: [regularUser.id], permission: 'both' }
+            });
+            expect(unshareRes.status).toBe(200);
+
+            // All ancestor directories should no longer list regularUser in read
+            const nestedDirReaders = await getReadPermissions(nestedDir);
+            const level1Readers = await getReadPermissions(`${permRoot}/level1`);
+            const rootReaders = await getReadPermissions(permRoot);
+
+            expect(nestedDirReaders).not.toContain(regularUser.id);
+            expect(level1Readers).not.toContain(regularUser.id);
+            expect(rootReaders).not.toContain(regularUser.id);
+        });
+
+        test('unsharing one file preserves parent permissions when sibling is still shared', async () => {
+            // Share both files
+            await client.post(`/api/v1/files/${encodePath(fileA)}/share`, {
+                userIds: [regularUser.id], permission: 'read'
+            });
+            await client.post(`/api/v1/files/${encodePath(fileB)}/share`, {
+                userIds: [regularUser.id], permission: 'read'
+            });
+
+            // Unshare only fileA
+            await client.delete(`/api/v1/files/${encodePath(fileA)}/share`, {
+                data: { userIds: [regularUser.id], permission: 'both' }
+            });
+
+            // Parents should still have regularUser because fileB is still shared
+            const nestedDirReaders = await getReadPermissions(nestedDir);
+            const level1Readers = await getReadPermissions(`${permRoot}/level1`);
+            const rootReaders = await getReadPermissions(permRoot);
+
+            expect(nestedDirReaders).toContain(regularUser.id);
+            expect(level1Readers).toContain(regularUser.id);
+            expect(rootReaders).toContain(regularUser.id);
+        });
+
+        test('unsharing last remaining file completes parent cleanup', async () => {
+            // fileB is still shared from previous test — unshare it
+            await client.delete(`/api/v1/files/${encodePath(fileB)}/share`, {
+                data: { userIds: [regularUser.id], permission: 'both' }
+            });
+
+            // Now NO shared descendants remain so all ancestors should be cleaned
+            const nestedDirReaders = await getReadPermissions(nestedDir);
+            const level1Readers = await getReadPermissions(`${permRoot}/level1`);
+            const rootReaders = await getReadPermissions(permRoot);
+
+            expect(nestedDirReaders).not.toContain(regularUser.id);
+            expect(level1Readers).not.toContain(regularUser.id);
+            expect(rootReaders).not.toContain(regularUser.id);
+        });
+    });
+
+    // =========================================================================
+    // WORKSPACE OWNERSHIP AND CROSS-WORKSPACE OPERATIONS
+    // =========================================================================
+
+    describe('Workspace ownership and cross-workspace operations', () => {
+        let creatorRoot;
+        let regularUserRoot;
+        let sharedDir;
+
+        beforeAll(async () => {
+            creatorRoot = `/${testStartup.creator.username}/ownership-test-${Date.now()}`;
+            regularUserRoot = `/${testStartup.user.username}/ownership-test-${Date.now()}`;
+
+            // Creator sets up their workspace and shares a directory with regularUser for write access
+            await testStartup.loginAsUser('creator');
+            await client.post('/api/v1/files/directory', { dirPath: creatorRoot, description: 'Creator workspace' });
+            sharedDir = `${creatorRoot}/shared`;
+            await client.post('/api/v1/files/directory', { dirPath: sharedDir, description: 'Shared dir' });
+
+            // Share the directory with regularUser for write
+            await client.post(`/api/v1/files/${encodePath(sharedDir)}/share`, {
+                userIds: [regularUser.id],
+                permission: 'write'
+            });
+
+            // regularUser sets up their own workspace
+            await testStartup.loginAsUser('user');
+            await client.post('/api/v1/files/directory', { dirPath: regularUserRoot, description: 'User workspace' });
+
+            // Share regularUser workspace with creator for write
+            await client.post(`/api/v1/files/${encodePath(regularUserRoot)}/share`, {
+                userIds: [testStartup.creator.id],
+                permission: 'write'
+            });
+
+            await testStartup.loginAsUser('creator');
+        }, 60000);
+
+        describe('File creation ownership', () => {
+            test('file created in own workspace is owned by the creator', async () => {
+                const filePath = `${creatorRoot}/own-file.txt`;
+                const resp = await client.post('/api/v1/files', {
+                    filePath,
+                    content: 'Created by owner',
+                    description: 'Own workspace file'
+                });
+                expect(resp.status).toBe(201);
+
+                const meta = await client.get(`/api/v1/files/${encodePath(filePath)}/metadata`);
+                expect(meta.status).toBe(200);
+                const metadata = meta.data.metadata || meta.data;
+                expect(metadata.owner._id || metadata.owner).toBe(testStartup.creator.id);
+            });
+
+            test('file created by guest in another users workspace is owned by workspace owner', async () => {
+                await testStartup.loginAsUser('user');
+                const filePath = `${sharedDir}/guest-created.txt`;
+                const resp = await client.post('/api/v1/files', {
+                    filePath,
+                    content: 'Created by guest',
+                    description: 'Guest-created file'
+                });
+                expect(resp.status).toBe(201);
+
+                // Switch to creator to inspect ownership
+                await testStartup.loginAsUser('creator');
+                const meta = await client.get(`/api/v1/files/${encodePath(filePath)}/metadata`);
+                expect(meta.status).toBe(200);
+                const metadata = meta.data.metadata || meta.data;
+                const ownerId = (metadata.owner._id || metadata.owner).toString();
+                expect(ownerId).toBe(testStartup.creator.id);
+            });
+
+            test('guest retains read and write permissions on file created in another workspace', async () => {
+                await testStartup.loginAsUser('user');
+                const filePath = `${sharedDir}/guest-perms.txt`;
+                await client.post('/api/v1/files', {
+                    filePath,
+                    content: 'Guest permissions check',
+                    description: 'Permission test'
+                });
+
+                await testStartup.loginAsUser('creator');
+                const meta = await client.get(`/api/v1/files/${encodePath(filePath)}/metadata`);
+                expect(meta.status).toBe(200);
+                const metadata = meta.data.metadata || meta.data;
+                const readIds = (metadata.permissions?.read || []).map(u => (u._id || u).toString());
+                const writeIds = (metadata.permissions?.write || []).map(u => (u._id || u).toString());
+                expect(readIds).toContain(regularUser.id);
+                expect(writeIds).toContain(regularUser.id);
+            });
+        });
+
+        describe('Directory creation ownership', () => {
+            test('directory created in own workspace is owned by the creator', async () => {
+                const dirPath = `${creatorRoot}/own-dir`;
+                const resp = await client.post('/api/v1/files/directory', {
+                    dirPath,
+                    description: 'Own workspace dir'
+                });
+                expect(resp.status).toBe(201);
+
+                const meta = await client.get(`/api/v1/files/${encodePath(dirPath)}/metadata`);
+                expect(meta.status).toBe(200);
+                const metadata = meta.data.metadata || meta.data;
+                expect((metadata.owner._id || metadata.owner).toString()).toBe(testStartup.creator.id);
+            });
+
+            test('directory created by guest in another users workspace is owned by workspace owner', async () => {
+                await testStartup.loginAsUser('user');
+                const dirPath = `${sharedDir}/guest-dir`;
+                const resp = await client.post('/api/v1/files/directory', {
+                    dirPath,
+                    description: 'Guest-created directory'
+                });
+                expect(resp.status).toBe(201);
+
+                await testStartup.loginAsUser('creator');
+                const meta = await client.get(`/api/v1/files/${encodePath(dirPath)}/metadata`);
+                expect(meta.status).toBe(200);
+                const metadata = meta.data.metadata || meta.data;
+                expect((metadata.owner._id || metadata.owner).toString()).toBe(testStartup.creator.id);
+            });
+        });
+
+        describe('Copy across workspaces', () => {
+            test('copy to another users workspace sets owner to destination workspace owner', async () => {
+                // Creator creates a source file
+                const srcPath = `${creatorRoot}/copy-src.txt`;
+                await client.post('/api/v1/files', {
+                    filePath: srcPath,
+                    content: 'Copy source content',
+                    description: 'File to copy'
+                });
+
+                // Creator copies to regularUser workspace
+                const destPath = `${regularUserRoot}/copied-from-creator.txt`;
+                const copyResp = await client.post('/api/v1/files/copy', {
+                    sourcePath: srcPath,
+                    destinationPath: destPath
+                });
+                expect(copyResp.status).toBe(201);
+
+                // Check the copied file is owned by regularUser (workspace owner)
+                const meta = await client.get(`/api/v1/files/${encodePath(destPath)}/metadata`);
+                expect(meta.status).toBe(200);
+                const metadata = meta.data.metadata || meta.data;
+                expect((metadata.owner._id || metadata.owner).toString()).toBe(regularUser.id);
+            });
+
+            test('actor retains read and write on copied file in another workspace', async () => {
+                const srcPath = `${creatorRoot}/copy-perm-src.txt`;
+                await client.post('/api/v1/files', {
+                    filePath: srcPath,
+                    content: 'Permission copy test',
+                    description: 'Copy perms test'
+                });
+
+                const destPath = `${regularUserRoot}/copied-with-perms.txt`;
+                await client.post('/api/v1/files/copy', {
+                    sourcePath: srcPath,
+                    destinationPath: destPath
+                });
+
+                const meta = await client.get(`/api/v1/files/${encodePath(destPath)}/metadata`);
+                expect(meta.status).toBe(200);
+                const metadata = meta.data.metadata || meta.data;
+                const readIds = (metadata.permissions?.read || []).map(u => (u._id || u).toString());
+                const writeIds = (metadata.permissions?.write || []).map(u => (u._id || u).toString());
+                expect(readIds).toContain(testStartup.creator.id);
+                expect(writeIds).toContain(testStartup.creator.id);
+            });
+        });
+
+        describe('Move across workspaces', () => {
+            test('move to another users workspace updates owner to destination workspace owner', async () => {
+                const srcPath = `${creatorRoot}/move-src.txt`;
+                await client.post('/api/v1/files', {
+                    filePath: srcPath,
+                    content: 'Move source content',
+                    description: 'File to move'
+                });
+
+                const destPath = `${regularUserRoot}/moved-from-creator.txt`;
+                const moveResp = await client.post('/api/v1/files/move', {
+                    sourcePath: srcPath,
+                    destinationPath: destPath
+                });
+                expect(moveResp.status).toBe(200);
+
+                await new Promise(resolve => setTimeout(resolve, 2000));
+
+                const meta = await client.get(`/api/v1/files/${encodePath(destPath)}/metadata`);
+                expect(meta.status).toBe(200);
+                const metadata = meta.data.metadata || meta.data;
+                expect((metadata.owner._id || metadata.owner).toString()).toBe(regularUser.id);
+            });
+
+            test('actor retains read and write on moved file in another workspace', async () => {
+                const srcPath = `${creatorRoot}/move-perm-src.txt`;
+                await client.post('/api/v1/files', {
+                    filePath: srcPath,
+                    content: 'Move perms test',
+                    description: 'Move perms test'
+                });
+
+                const destPath = `${regularUserRoot}/moved-with-perms.txt`;
+                await client.post('/api/v1/files/move', {
+                    sourcePath: srcPath,
+                    destinationPath: destPath
+                });
+
+                await new Promise(resolve => setTimeout(resolve, 2000));
+
+                const meta = await client.get(`/api/v1/files/${encodePath(destPath)}/metadata`);
+                expect(meta.status).toBe(200);
+                const metadata = meta.data.metadata || meta.data;
+                const readIds = (metadata.permissions?.read || []).map(u => (u._id || u).toString());
+                const writeIds = (metadata.permissions?.write || []).map(u => (u._id || u).toString());
+                expect(readIds).toContain(testStartup.creator.id);
+                expect(writeIds).toContain(testStartup.creator.id);
+            });
+
+            test('move within own workspace keeps owner same', async () => {
+                const srcPath = `${creatorRoot}/move-same-ws.txt`;
+                await client.post('/api/v1/files', {
+                    filePath: srcPath,
+                    content: 'Same workspace move',
+                    description: 'Same workspace move'
+                });
+
+                const destDir = `${creatorRoot}/sub-move`;
+                await client.post('/api/v1/files/directory', { dirPath: destDir, description: 'Move target dir' });
+
+                const destPath = `${destDir}/move-same-ws.txt`;
+                const moveResp = await client.post('/api/v1/files/move', {
+                    sourcePath: srcPath,
+                    destinationPath: destPath
+                });
+                expect(moveResp.status).toBe(200);
+
+                await new Promise(resolve => setTimeout(resolve, 2000));
+
+                const meta = await client.get(`/api/v1/files/${encodePath(destPath)}/metadata`);
+                expect(meta.status).toBe(200);
+                const metadata = meta.data.metadata || meta.data;
+                expect((metadata.owner._id || metadata.owner).toString()).toBe(testStartup.creator.id);
+            });
+        });
+
+        describe('Upload across workspaces', () => {
+            test('upload to another users workspace sets owner to workspace owner', async () => {
+                const formData = new FormData();
+                formData.append('files', Buffer.from('Upload to other workspace'), {
+                    filename: 'cross-upload.txt',
+                    contentType: 'text/plain'
+                });
+                formData.append('basePath', regularUserRoot);
+                formData.append('overwrite', 'true');
+
+                const uploadResp = await client.post('/api/v1/files/upload', formData, {
+                    headers: formData.getHeaders()
+                });
+                expect(uploadResp.status).toBe(201);
+
+                const filePath = `${regularUserRoot}/cross-upload.txt`;
+                const meta = await client.get(`/api/v1/files/${encodePath(filePath)}/metadata`);
+                expect(meta.status).toBe(200);
+                const metadata = meta.data.metadata || meta.data;
+                expect((metadata.owner._id || metadata.owner).toString()).toBe(regularUser.id);
+            });
+        });
+
+        describe('Unique filePath constraint', () => {
+            test('duplicate filePath is rejected regardless of user', async () => {
+                const filePath = `${creatorRoot}/unique-test.txt`;
+                const first = await client.post('/api/v1/files', {
+                    filePath,
+                    content: 'First',
+                    description: 'First creation'
+                });
+                expect(first.status).toBe(201);
+
+                // Same path by same user should fail
+                const second = await client.post('/api/v1/files', {
+                    filePath,
+                    content: 'Second',
+                    description: 'Duplicate'
+                });
+                expect([400, 409]).toContain(second.status);
+
+                // Same path by different user should also fail
+                await testStartup.loginAsUser('user');
+                const third = await client.post('/api/v1/files', {
+                    filePath,
+                    content: 'Third',
+                    description: 'Duplicate from another user'
+                });
+                expect([400, 403, 409]).toContain(third.status);
+                await testStartup.loginAsUser('creator');
+            });
+        });
+    });
+
+    // =========================================================================
+    // DIRECTORY TREE WRITABLE FLAG
+    // =========================================================================
+
+    describe('Directory tree writable flag', () => {
+        let treeRoot;
+        let treeSharedDir;
+
+        beforeAll(async () => {
+            treeRoot = `/${testStartup.creator.username}/tree-test-${Date.now()}`;
+            await testStartup.loginAsUser('creator');
+            await client.post('/api/v1/files/directory', { dirPath: treeRoot, description: 'Tree test root' });
+
+            treeSharedDir = `${treeRoot}/shared-writable`;
+            await client.post('/api/v1/files/directory', { dirPath: treeSharedDir, description: 'Shared dir' });
+
+            // Create a file inside the shared directory
+            await client.post('/api/v1/files', {
+                filePath: `${treeSharedDir}/shared-file.txt`,
+                content: 'Shared file',
+                description: 'Shared file'
+            });
+
+            // Share directory with regularUser for write
+            await client.post(`/api/v1/files/${encodePath(treeSharedDir)}/share`, {
+                userIds: [regularUser.id],
+                permission: 'write'
+            });
+
+            // Share a read-only file
+            const readOnlyFile = `${treeRoot}/read-only.txt`;
+            await client.post('/api/v1/files', {
+                filePath: readOnlyFile,
+                content: 'Read-only content',
+                description: 'Read-only file'
+            });
+            await client.post(`/api/v1/files/${encodePath(readOnlyFile)}/share`, {
+                userIds: [regularUser.id],
+                permission: 'read'
+            });
+        }, 60000);
+
+        test('owner sees writable: true on all nodes in own workspace', async () => {
+            await testStartup.loginAsUser('creator');
+            const resp = await client.get(`/api/v1/files/tree?rootPath=${encodeURIComponent(treeRoot)}&format=object`);
+            expect(resp.status).toBe(200);
+
+            const tree = resp.data.tree || resp.data;
+            // All nodes owned by creator should be writable
+            const checkWritable = (children) => {
+                for (const key of Object.keys(children)) {
+                    const node = children[key];
+                    expect(node.writable).toBe(true);
+                    if (node.children && Object.keys(node.children).length > 0) {
+                        checkWritable(node.children);
+                    }
+                }
+            };
+            checkWritable(tree);
+        });
+
+        test('shared user sees writable: true on write-shared nodes', async () => {
+            await testStartup.loginAsUser('user');
+            const resp = await client.get('/api/v1/files/tree?rootPath=/&format=object');
+            expect(resp.status).toBe(200);
+
+            const tree = resp.data.tree || resp.data;
+
+            // Walk the tree to find the shared-writable directory
+            const findNode = (children, targetName) => {
+                for (const key of Object.keys(children)) {
+                    if (key === targetName) return children[key];
+                    if (children[key].children) {
+                        const found = findNode(children[key].children, targetName);
+                        if (found) return found;
+                    }
+                }
+                return null;
+            };
+
+            const sharedNode = findNode(tree, 'shared-writable');
+            if (sharedNode) {
+                expect(sharedNode.writable).toBe(true);
+            }
+        });
+
+        test('shared user sees writable: false on read-only shared nodes', async () => {
+            await testStartup.loginAsUser('user');
+            const resp = await client.get('/api/v1/files/tree?rootPath=/&format=object');
+            expect(resp.status).toBe(200);
+
+            const tree = resp.data.tree || resp.data;
+
+            const findNode = (children, targetName) => {
+                for (const key of Object.keys(children)) {
+                    if (key === targetName) return children[key];
+                    if (children[key].children) {
+                        const found = findNode(children[key].children, targetName);
+                        if (found) return found;
+                    }
+                }
+                return null;
+            };
+
+            const readOnlyNode = findNode(tree, 'read-only.txt');
+            if (readOnlyNode) {
+                expect(readOnlyNode.writable).toBe(false);
+            }
+        });
+
+        test('tree nodes include writable field in array format', async () => {
+            await testStartup.loginAsUser('creator');
+            const resp = await client.get(`/api/v1/files/tree?rootPath=${encodeURIComponent(treeRoot)}&format=array`);
+            expect(resp.status).toBe(200);
+
+            const treeData = resp.data.tree || resp.data;
+            // Array format wraps children in a root node object
+            const children = treeData.children || treeData;
+            expect(Array.isArray(children)).toBe(true);
+
+            const checkArrayWritable = (nodes) => {
+                for (const node of nodes) {
+                    expect(node).toHaveProperty('writable');
+                    expect(typeof node.writable).toBe('boolean');
+                    if (node.children && node.children.length > 0) {
+                        checkArrayWritable(node.children);
+                    }
+                }
+            };
+            checkArrayWritable(children);
+        });
+    });
+
+    // =========================================================================
+    // COMMENT SYSTEM TESTS
+    // =========================================================================
+
+    describe('Comment System Tests', () => {
+        let fileOwner;
+        let commenter;
+        let outsiderUser;
+        let testFileId;
+        let testGroupId;
+        let commentId;
+        let replyId;
+
+        const loginAs = async (mutableUser) => {
+            const response = await client.post('/api/v1/auth/login', mutableUser.credentials);
+            expect(response.status).toBe(200);
+            return response;
+        };
+
+        beforeAll(async () => {
+            // Create mutable users using the existing testStartup (same server/db)
+            fileOwner = await testStartup.createMutableUser({ role: 'CREATOR', firstName: 'File', lastName: 'Owner', prefix: 'cmt_owner' });
+            commenter = await testStartup.createMutableUser({ role: 'CREATOR', firstName: 'Comment', lastName: 'Author', prefix: 'cmt_author' });
+            outsiderUser = await testStartup.createMutableUser({ role: 'USER', firstName: 'Comment', lastName: 'Outsider', prefix: 'cmt_out' });
+
+            // Create a file to comment on
+            await loginAs(fileOwner);
+            const cmtRoot = `/cmt-test-${Date.now()}`;
+            await client.post('/api/v1/files/directory', { dirPath: cmtRoot, description: 'Comment test dir' });
+            const fileResp = await client.post('/api/v1/files', {
+                filePath: `${cmtRoot}/commentable.txt`,
+                content: 'This file has comments',
+                description: 'Test file for comments'
+            });
+            testFileId = fileResp.data.file?.id || fileResp.data.file?._id;
+
+            // Establish connection between fileOwner and commenter (required for sharing)
+            await client.post(`/api/v1/users/${commenter.id}/connect`);
+            await loginAs(commenter);
+            await client.put(`/api/v1/users/${fileOwner.id}/connect`, { action: 'accept' });
+            await loginAs(fileOwner);
+
+            // Share with commenter so they have read access
+            await client.post(`/api/v1/files/${encodeURIComponent(`${cmtRoot}/commentable.txt`)}/share`, {
+                userIds: [commenter.id],
+                permission: 'read'
+            });
+
+            // Create a group and share the file there for group-context comment tests
+            const groupResp = await client.post('/api/v1/users/groups', {
+                name: 'Comment Test Group',
+                description: 'Group for comment testing',
+                privacy: 'private'
+            });
+            testGroupId = groupResp.data.data._id;
+
+            // Add commenter to group with WRITE role
+            await client.post(`/api/v1/users/groups/${testGroupId}/members`, {
+                userId: commenter.id,
+                role: 'WRITE'
+            });
+
+            console.log('Comment tests initialized (reusing file test server)');
+        }, 60000);
+
+    // =========================================================================
+    // POST /api/v1/files/comments - Create Comment
+    // =========================================================================
+    describe('POST /api/v1/files/comments - Create Comment', () => {
+        it('should create a comment on a file the user owns', async () => {
+            await loginAs(fileOwner);
+            const response = await client.post('/api/v1/files/comments', {
+                fileId: testFileId,
+                body: 'This is my first comment!'
+            });
+
+            expect(response.status).toBe(201);
+            expect(response.data.success).toBe(true);
+            expect(response.data.data).toHaveProperty('_id');
+            expect(response.data.data.body).toBe('This is my first comment!');
+            expect(response.data.data.file).toBe(testFileId);
+            expect(response.data.data.author).toHaveProperty('firstName');
+
+            commentId = response.data.data._id;
+        });
+
+        it('should create a comment with read permission', async () => {
+            await loginAs(commenter);
+            const response = await client.post('/api/v1/files/comments', {
+                fileId: testFileId,
+                body: 'Comment from a reader'
+            });
+
+            expect(response.status).toBe(201);
+            expect(response.data.data.body).toBe('Comment from a reader');
+        });
+
+        it('should create a group-context comment', async () => {
+            await loginAs(commenter);
+            const response = await client.post('/api/v1/files/comments', {
+                fileId: testFileId,
+                body: 'Group comment!',
+                groupId: testGroupId
+            });
+
+            expect(response.status).toBe(201);
+            expect(response.data.data.group).toBe(testGroupId);
+        });
+
+        it('should create a reply to an existing comment', async () => {
+            await loginAs(fileOwner);
+            const response = await client.post('/api/v1/files/comments', {
+                fileId: testFileId,
+                body: 'This is a reply',
+                parentComment: commentId
+            });
+
+            expect(response.status).toBe(201);
+            expect(response.data.data.parentComment).toBe(commentId);
+            replyId = response.data.data._id;
+        });
+
+        it('should reject comment from user without access', async () => {
+            await loginAs(outsiderUser);
+            const response = await client.post('/api/v1/files/comments', {
+                fileId: testFileId,
+                body: 'Should fail'
+            });
+
+            expect(response.status).toBe(403);
+            expect(response.data.success).toBe(false);
+        });
+
+        it('should reject comment on non-existent file', async () => {
+            await loginAs(fileOwner);
+            const fakeFileId = '000000000000000000000000';
+            const response = await client.post('/api/v1/files/comments', {
+                fileId: fakeFileId,
+                body: 'No file'
+            });
+
+            expect(response.status).toBe(404);
+        });
+
+        it('should reject reply to non-existent parent', async () => {
+            await loginAs(fileOwner);
+            const fakeCommentId = '000000000000000000000000';
+            const response = await client.post('/api/v1/files/comments', {
+                fileId: testFileId,
+                body: 'Reply to nothing',
+                parentComment: fakeCommentId
+            });
+
+            expect(response.status).toBe(404);
+        });
+
+        it('should reject comment with empty body', async () => {
+            await loginAs(fileOwner);
+            const response = await client.post('/api/v1/files/comments', {
+                fileId: testFileId,
+                body: ''
+            });
+
+            expect(response.status).toBe(400);
+        });
+
+        it('should require authentication', async () => {
+            client.clearCookies();
+            const response = await client.post('/api/v1/files/comments', {
+                fileId: testFileId,
+                body: 'Anon comment'
+            });
+
+            expect(response.status).toBe(401);
+        });
+    });
+
+    // =========================================================================
+    // GET /api/v1/files/comments/file/:fileId - Get File Comments
+    // =========================================================================
+    describe('GET /api/v1/files/comments/file/:fileId - Get File Comments', () => {
+        it('should return top-level comments for a file', async () => {
+            await loginAs(fileOwner);
+            const response = await client.get(`/api/v1/files/comments/file/${testFileId}`);
+
+            expect(response.status).toBe(200);
+            expect(response.data.success).toBe(true);
+            expect(Array.isArray(response.data.data)).toBe(true);
+            expect(response.data.pagination).toBeDefined();
+            expect(response.data.pagination).toHaveProperty('page');
+            expect(response.data.pagination).toHaveProperty('limit');
+            expect(response.data.pagination).toHaveProperty('total');
+
+            // Should not include replies in top-level
+            const hasParent = response.data.data.some(c => c.parentComment !== null);
+            expect(hasParent).toBe(false);
+        });
+
+        it('should include replyCount on each comment', async () => {
+            await loginAs(fileOwner);
+            const response = await client.get(`/api/v1/files/comments/file/${testFileId}`);
+
+            const topComment = response.data.data.find(c => c._id === commentId);
+            if (topComment) {
+                expect(topComment).toHaveProperty('replyCount');
+                expect(topComment.replyCount).toBeGreaterThanOrEqual(1);
+            }
+        });
+
+        it('should filter by groupId', async () => {
+            await loginAs(commenter);
+            const response = await client.get(`/api/v1/files/comments/file/${testFileId}?groupId=${testGroupId}`);
+
+            expect(response.status).toBe(200);
+            response.data.data.forEach(c => {
+                expect(c.group).toBe(testGroupId);
+            });
+        });
+
+        it('should support pagination', async () => {
+            await loginAs(fileOwner);
+            const response = await client.get(`/api/v1/files/comments/file/${testFileId}?page=1&limit=1`);
+
+            expect(response.status).toBe(200);
+            expect(response.data.pagination.page).toBe(1);
+            expect(response.data.pagination.limit).toBe(1);
+            expect(response.data.data.length).toBeLessThanOrEqual(1);
+        });
+    });
+
+    // =========================================================================
+    // GET /api/v1/files/comments/:commentId/replies - Get Replies
+    // =========================================================================
+    describe('GET /api/v1/files/comments/:commentId/replies - Get Replies', () => {
+        it('should return replies to a comment', async () => {
+            await loginAs(fileOwner);
+            const response = await client.get(`/api/v1/files/comments/${commentId}/replies`);
+
+            expect(response.status).toBe(200);
+            expect(response.data.success).toBe(true);
+            expect(Array.isArray(response.data.data)).toBe(true);
+            expect(response.data.pagination).toBeDefined();
+
+            if (response.data.data.length > 0) {
+                const reply = response.data.data[0];
+                expect(reply.parentComment).toBe(commentId);
+                expect(reply.author).toHaveProperty('firstName');
+            }
+        });
+
+        it('should return empty for comment with no replies', async () => {
+            await loginAs(fileOwner);
+            const response = await client.get(`/api/v1/files/comments/${replyId}/replies`);
+
+            expect(response.status).toBe(200);
+            expect(response.data.data).toEqual([]);
+        });
+    });
+
+    // =========================================================================
+    // GET /api/v1/files/comments/file/:fileId/count - Get Comment Count
+    // =========================================================================
+    describe('GET /api/v1/files/comments/file/:fileId/count - Get Comment Count', () => {
+        it('should return comment count for a file', async () => {
+            await loginAs(fileOwner);
+            const response = await client.get(`/api/v1/files/comments/file/${testFileId}/count`);
+
+            expect(response.status).toBe(200);
+            expect(response.data).toEqual({
+                success: true,
+                data: { count: expect.any(Number) }
+            });
+            expect(response.data.data.count).toBeGreaterThanOrEqual(1);
+        });
+
+        it('should filter count by groupId', async () => {
+            await loginAs(fileOwner);
+            const response = await client.get(`/api/v1/files/comments/file/${testFileId}/count?groupId=${testGroupId}`);
+
+            expect(response.status).toBe(200);
+            expect(response.data.data.count).toBeGreaterThanOrEqual(1);
+        });
+
+        it('should return 0 for file with no comments', async () => {
+            await loginAs(fileOwner);
+            const fakeFileId = '000000000000000000000000';
+            const response = await client.get(`/api/v1/files/comments/file/${fakeFileId}/count`);
+
+            expect(response.status).toBe(200);
+            expect(response.data.data.count).toBe(0);
+        });
+    });
+
+    // =========================================================================
+    // PATCH /api/v1/files/comments/:commentId - Update Comment
+    // =========================================================================
+    describe('PATCH /api/v1/files/comments/:commentId - Update Comment', () => {
+        it('should update own comment', async () => {
+            await loginAs(fileOwner);
+            const response = await client.patch(`/api/v1/files/comments/${commentId}`, {
+                body: 'Updated comment body'
+            });
+
+            expect(response.status).toBe(200);
+            expect(response.data.success).toBe(true);
+            expect(response.data.data.body).toBe('Updated comment body');
+            expect(response.data.data.editedAt).toBeDefined();
+            expect(response.data.data.author).toHaveProperty('firstName');
+        });
+
+        it('should deny editing another user\'s comment', async () => {
+            await loginAs(commenter);
+            const response = await client.patch(`/api/v1/files/comments/${commentId}`, {
+                body: 'Hijacked!'
+            });
+
+            expect(response.status).toBe(403);
+            expect(response.data.success).toBe(false);
+        });
+
+        it('should return 404 for non-existent comment', async () => {
+            await loginAs(fileOwner);
+            const fakeId = '000000000000000000000000';
+            const response = await client.patch(`/api/v1/files/comments/${fakeId}`, {
+                body: 'Ghost'
+            });
+
+            expect(response.status).toBe(404);
+        });
+    });
+
+    // =========================================================================
+    // DELETE /api/v1/files/comments/:commentId - Delete Comment (Soft)
+    // =========================================================================
+    describe('DELETE /api/v1/files/comments/:commentId - Delete Comment', () => {
+        it('should soft-delete own comment', async () => {
+            // Create a disposable comment
+            await loginAs(commenter);
+            const createResp = await client.post('/api/v1/files/comments', {
+                fileId: testFileId,
+                body: 'This will be deleted'
+            });
+            const disposableId = createResp.data.data._id;
+
+            const response = await client.delete(`/api/v1/files/comments/${disposableId}`);
+
+            expect(response.status).toBe(200);
+            expect(response.data).toEqual({
+                success: true,
+                message: 'Comment deleted'
+            });
+        });
+
+        it('should allow file owner to delete any comment', async () => {
+            // commenter creates a comment, fileOwner deletes it
+            await loginAs(commenter);
+            const createResp = await client.post('/api/v1/files/comments', {
+                fileId: testFileId,
+                body: 'Owner will delete this'
+            });
+            const targetId = createResp.data.data._id;
+
+            await loginAs(fileOwner);
+            const response = await client.delete(`/api/v1/files/comments/${targetId}`);
+
+            expect(response.status).toBe(200);
+            expect(response.data.message).toBe('Comment deleted');
+        });
+
+        it('should deny outsider from deleting comment', async () => {
+            await loginAs(fileOwner);
+            const createResp = await client.post('/api/v1/files/comments', {
+                fileId: testFileId,
+                body: 'Protected comment'
+            });
+            const protectedId = createResp.data.data._id;
+
+            await loginAs(outsiderUser);
+            const response = await client.delete(`/api/v1/files/comments/${protectedId}`);
+
+            expect(response.status).toBe(403);
+        });
+
+        it('should return 404 for already-deleted comment', async () => {
+            await loginAs(fileOwner);
+            const createResp = await client.post('/api/v1/files/comments', {
+                fileId: testFileId,
+                body: 'Delete me twice'
+            });
+            const id = createResp.data.data._id;
+
+            await client.delete(`/api/v1/files/comments/${id}`);
+            const response = await client.delete(`/api/v1/files/comments/${id}`);
+
+            expect(response.status).toBe(404);
+        });
+    });
     });
 });
 
