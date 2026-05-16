@@ -73,11 +73,12 @@ describe('File Routes - HTTP API', () => {
         return response;
     };
 
-    const uploadFile = async (buffer, filename, targetDir, contentType, overwrite = false) => {
+    const uploadFile = async (buffer, filename, targetDir, contentType, overwrite = false, textImports = null) => {
         const form = new FormData();
         form.append('files', buffer, { filename, contentType });
         form.append('basePath', targetDir);
         if (overwrite) form.append('overwrite', 'true');
+        if (textImports) form.append('textImports', JSON.stringify(textImports));
         return client.post('/api/v1/files/upload', form, { headers: form.getHeaders() });
     };
 
@@ -970,7 +971,7 @@ describe('File Routes - HTTP API', () => {
                 newName: 'edge-target.txt'
             });
 
-            expect(renameResponse.status).toBe(400);
+            expect(renameResponse.status).toBe(409);
             expect(renameResponse.data.success).toBe(false);
             expect(renameResponse.data.message || renameResponse.data.error).toMatch(/already exists/i);
         });
@@ -1268,7 +1269,7 @@ describe('File Routes - HTTP API', () => {
         test('handles missing version numbers', async () => {
             await createFile(`${testRoot}/version-test.txt`, 'Version test', 'Test file for version errors');
             const response = await client.get(`/api/v1/files/${encodePath(`${testRoot}/version-test.txt`)}/versions/999`);
-            expect(response.status).toBe(400);
+            expect(response.status).toBe(404);
         });
 
         test('handles empty file creation', async () => {
@@ -1307,10 +1308,11 @@ describe('File Routes - HTTP API', () => {
         });
 
         test('handles directory operations on root', async () => {
+            // Regular users (CREATOR) are forbidden from querying root stats
             const rootStatsResponse = await client.get('/api/v1/files/directory/stats?filePath=%2F');
-            expect(rootStatsResponse.status).toBe(200);
-            expect(rootStatsResponse.data.success).toBe(true);
+            expect(rootStatsResponse.status).toBe(403);
 
+            // Root contents is still accessible (virtual listing of accessible top-level dirs)
             const rootContentsResponse = await client.get('/api/v1/files/directory/contents?filePath=%2F');
             expect(rootContentsResponse.status).toBe(200);
             expect(Array.isArray(rootContentsResponse.data.contents)).toBe(true);
@@ -1403,6 +1405,8 @@ describe('File Routes - HTTP API', () => {
                 textFilesDir,
                 binaryFilesDir,
                 emptyDir,
+                `${statsTestRoot}/nested`,
+                `${statsTestRoot}/nested/deep`,
                 nestedDir
             ];
 
@@ -1956,13 +1960,16 @@ describe('File Routes - HTTP API', () => {
             expect(resp.status).toBe(201);
         });
 
-        it('uploads a DOCX and converts to HTML in Yjs (no binary gibberish)', async () => {
+        it('uploads a DOCX with textImports HTML and stores it in Yjs (no binary gibberish)', async () => {
             const docxBuffer = await buildMinimalDocx('Hello from DOCX');
+            const htmlContent = '<p>Hello from DOCX</p>';
             const resp = await uploadFile(
                 docxBuffer,
                 'report.docx',
                 dir,
                 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+                false,
+                [{ content: htmlContent }],
             );
             expect(resp.status).toBe(201);
 
@@ -1993,11 +2000,14 @@ describe('File Routes - HTTP API', () => {
 
         it('re-uploads DOCX with different content — fresh HTML in Yjs', async () => {
             const docxBuffer = await buildMinimalDocx('Second version DOCX');
+            const htmlContent = '<p>Second version DOCX</p>';
             const resp = await uploadFile(
                 docxBuffer,
                 'report.docx',
                 dir,
                 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+                false,
+                [{ content: htmlContent }],
             );
             expect(resp.status).toBe(201);
 
@@ -2009,12 +2019,14 @@ describe('File Routes - HTTP API', () => {
 
         it('overwrites DOCX — Yjs gets updated HTML', async () => {
             const docxBuffer = await buildMinimalDocx('Overwritten DOCX v3');
+            const htmlContent = '<p>Overwritten DOCX v3</p>';
             const resp = await uploadFile(
                 docxBuffer,
                 'report.docx',
                 dir,
                 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
                 true,
+                [{ content: htmlContent }],
             );
             expect(resp.status).toBe(201);
 
@@ -2139,6 +2151,8 @@ describe('File Routes - HTTP API', () => {
                 fileName,
                 dir,
                 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+                false,
+                [{ content: '<p>Resume content original</p>' }],
             );
             expect(resp.status).toBe(201);
 
@@ -2158,6 +2172,8 @@ describe('File Routes - HTTP API', () => {
                 fileName,
                 dir,
                 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+                false,
+                [{ content: '<p>Resume content updated</p>' }],
             );
             expect(resp.status).toBe(201);
 
@@ -2175,6 +2191,7 @@ describe('File Routes - HTTP API', () => {
                 dir,
                 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
                 true,
+                [{ content: '<p>Resume content v3 overwrite</p>' }],
             );
             expect(resp.status).toBe(201);
 
@@ -2757,7 +2774,7 @@ describe('File Routes - HTTP API', () => {
 
             // Create a file to comment on
             await loginAs(fileOwner);
-            const cmtRoot = `/cmt-test-${Date.now()}`;
+            const cmtRoot = `/${fileOwner.username}/cmt-test-${Date.now()}`;
             await client.post('/api/v1/files/directory', { dirPath: cmtRoot, description: 'Comment test dir' });
             const fileResp = await client.post('/api/v1/files', {
                 filePath: `${cmtRoot}/commentable.txt`,

@@ -2132,7 +2132,8 @@ describe('User Comprehensive Tests', () => {
 
             await client.post('/api/v1/files/directory', { dirPath, description: 'Creator dir' });
             const fileRes = await client.post('/api/v1/files', { filePath: testFilePath, content: 'Starred test content', description: 'Starring test' });
-            testFileId = fileRes.data.file._id || fileRes.data.file.id;
+            expect(fileRes.status).toBe(201);
+            testFileId = fileRes.data.file.id;
 
             // Ensure creator ↔ user are connected (idempotent)
             const status = await client.get(`/api/v1/users/${testStartup.user.id}/connection-status`);
@@ -2146,7 +2147,8 @@ describe('User Comprehensive Tests', () => {
             // Create + share a file for shared-starring tests
             const sharedPath = `${dirPath}/starred-shared-${Date.now()}.txt`;
             const sharedRes = await client.post('/api/v1/files', { filePath: sharedPath, content: 'Shared content', description: 'Shared file' });
-            sharedFileId = sharedRes.data.file._id || sharedRes.data.file.id;
+            expect(sharedRes.status).toBe(201);
+            sharedFileId = sharedRes.data.file.id;
             await client.post(`/api/v1/files/${encodeURIComponent(sharedPath)}/share`, { userIds: testStartup.user.id, permission: 'read' });
         }, 30000);
 

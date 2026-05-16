@@ -12,6 +12,7 @@ import bcrypt from 'bcryptjs';
 import ApiClient from './api.client.js';
 import { Server } from '../../file-server/server.js';
 import User from '../../file-server/models/user.model.js';
+import File from '../../file-server/models/file.model.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -110,6 +111,19 @@ class TestStartup {
             active: true
         });
         await user.save();
+
+        // Create root folder — mirrors what the signup API does
+        const rootPath = `/${username}`;
+        const rootExists = await File.exists({ filePath: rootPath, type: 'directory' });
+        if (!rootExists) {
+            await File.create({
+                filePath: rootPath,
+                fileName: username,
+                type: 'directory',
+                description: 'User root folder',
+                owner: user._id,
+            });
+        }
 
         const loginResponse = await client.post('/api/v1/auth/login', {
             identifier: username,
