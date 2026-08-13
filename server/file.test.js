@@ -12,6 +12,28 @@ import TestStartup from '../utils/test.startup.js';
 
 const encodePath = (filePath) => encodeURIComponent(filePath);
 
+/**
+ * Poll a request until it satisfies a predicate.
+ *
+ * Yjs persists on a debounce, so state written by one call is not immediately
+ * visible to the next. Polling returns as soon as the state settles instead of
+ * sleeping for a fixed worst-case budget.
+ */
+const waitForResponse = async (request, predicate, {timeout = 8000, interval = 100} = {}) => {
+    const deadline = Date.now() + timeout;
+    let last;
+
+    while (Date.now() < deadline) {
+        last = await request();
+        if (predicate(last)) {
+            return last;
+        }
+        await new Promise(resolve => setTimeout(resolve, interval));
+    }
+
+    return last;
+};
+
 describe('File Routes - HTTP API', () => {
     let testStartup;
     let client;
@@ -291,11 +313,13 @@ describe('File Routes - HTTP API', () => {
 
             currentFilePath = `${testRoot}/docs/sample-renamed.txt`;
 
-            // Wait for Yjs debouncing to complete (2 seconds + buffer)
-            await new Promise(resolve => setTimeout(resolve, 3000));
+            // Poll until Yjs debouncing has flushed the rename through
+            const metadataResponse = await waitForResponse(
+                () => client.get(`/api/v1/files/${encodePath(currentFilePath)}/metadata`),
+                (res) => res.status === 200
+                    && (res.data.metadata || res.data)?.fileName === 'sample-renamed.txt'
+            );
 
-            // Validate renamed file metadata
-            const metadataResponse = await client.get(`/api/v1/files/${encodePath(currentFilePath)}/metadata`);
             expect(metadataResponse.status).toBe(200);
             const metadata = metadataResponse.data.metadata || metadataResponse.data;
             expect(metadata.fileName).toBe('sample-renamed.txt');
@@ -488,9 +512,6 @@ describe('File Routes - HTTP API', () => {
             copiedFilePath = copyResponse.data.newPath;
             expect(copiedFilePath).toBe(`${copyDestination}/sample.txt`);
 
-            // Wait for Yjs operations to complete
-            await new Promise(resolve => setTimeout(resolve, 2000));
-
             console.log('✅ Text file copy successful - file operations work correctly');
         });
 
@@ -506,9 +527,6 @@ describe('File Routes - HTTP API', () => {
             expect(moveResponse.data.success).toBe(true);
             expect(moveResponse.data.newPath).toBe(`${archiveDestination}/sample.txt`);
             currentFilePath = moveResponse.data.newPath;
-
-            // Wait for Yjs operations to complete
-            await new Promise(resolve => setTimeout(resolve, 2000));
 
             console.log('✅ Text file move successful - file operations work correctly');
         });
@@ -660,10 +678,13 @@ describe('File Routes - HTTP API', () => {
             expect(moveResponse.data.newPath).toBe(finalPath);
 
             // Wait for move operations to complete (including Yjs migration)
-            await new Promise(resolve => setTimeout(resolve, 3000));
-            
-            console.log('📊 Yjs Document Move Validation: Content preserved and accessible at new path');            // Verify file metadata is updated
-            const movedMetadataResponse = await client.get(`/api/v1/files/${encodePath(finalPath)}/metadata`);
+            console.log('📊 Yjs Document Move Validation: Content preserved and accessible at new path');
+            // Poll until the move has flushed through to the metadata
+            const movedMetadataResponse = await waitForResponse(
+                () => client.get(`/api/v1/files/${encodePath(finalPath)}/metadata`),
+                (res) => res.status === 200
+                    && (res.data.metadata || res.data)?.filePath === finalPath
+            );
             expect(movedMetadataResponse.status).toBe(200);
             const movedMetadata = movedMetadataResponse.data.metadata || movedMetadataResponse.data;
             expect(movedMetadata.filePath).toBe(finalPath);
@@ -775,13 +796,15 @@ describe('File Routes - HTTP API', () => {
             expect(renameResponse.data.success).toBe(true);
             expect(renameResponse.data.newPath || renameResponse.data.filePath).toBe(renamedPath);
             
-            // Wait for rename operations to complete
-            await new Promise(resolve => setTimeout(resolve, 2000));
             
             console.log('📊 Yjs Document Rename Validation: Content preserved and accessible at new path');
             
             // Verify file content is preserved after rename
-            const renamedContentResponse = await client.get(`/api/v1/files/${encodePath(renamedPath)}/content`);
+            const renamedContentResponse = await waitForResponse(
+                () => client.get(`/api/v1/files/${encodePath(renamedPath)}/content`),
+                (res) => res.status === 200
+                    && (res.data.content || res.data.fileContent) === 'Content for rename test'
+            );
             expect(renamedContentResponse.status).toBe(200);
             const renamedContent = renamedContentResponse.data.content || renamedContentResponse.data.fileContent || '';
             expect(renamedContent).toBe('Content for rename test');
@@ -882,13 +905,15 @@ describe('File Routes - HTTP API', () => {
             expect(copyResponse.data.success).toBe(true);
             expect(copyResponse.data.newPath).toBe(copiedFilePath);
             
-            // Wait for copy operations to complete
-            await new Promise(resolve => setTimeout(resolve, 2000));
             
             console.log('📊 Yjs Document Copy Validation: Both source and copied content accessible at different paths');
             
             // Verify both source and copied file content are identical
-            const copiedContentResponse = await client.get(`/api/v1/files/${encodePath(copiedFilePath)}/content`);
+            const copiedContentResponse = await waitForResponse(
+                () => client.get(`/api/v1/files/${encodePath(copiedFilePath)}/content`),
+                (res) => res.status === 200
+                    && (res.data.content || res.data.fileContent) === 'Content for copy test'
+            );
             expect(copiedContentResponse.status).toBe(200);
             const copiedContent = copiedContentResponse.data.content || copiedContentResponse.data.fileContent || '';
             expect(copiedContent).toBe('Content for copy test');
@@ -937,10 +962,11 @@ describe('File Routes - HTTP API', () => {
             expect(response.data.collaborative.redis).toBeDefined();
             
             const redisHealth = response.data.collaborative.redis;
-            console.log('Redis Adapter Status:', redisHealth.status);
-            
-            // Redis should be in one of these states
-            expect(['healthy', 'disabled', 'not_available', 'disconnected', 'not_initialized']).toContain(redisHealth.status);
+
+            // YJS_REDIS_ENABLED is true in .env.test, so the adapter must report
+            // healthy. Accepting 'not_available' here previously hid the health
+            // check reading yjsService off the default export, where it does not exist.
+            expect(redisHealth.status).toBe('healthy');
         });
 
     });
@@ -2500,9 +2526,13 @@ describe('File Routes - HTTP API', () => {
                 });
                 expect(moveResp.status).toBe(200);
 
-                await new Promise(resolve => setTimeout(resolve, 2000));
+                const meta = await waitForResponse(
 
-                const meta = await client.get(`/api/v1/files/${encodePath(destPath)}/metadata`);
+                    () => client.get(`/api/v1/files/${encodePath(destPath)}/metadata`),
+
+                    (res) => res.status === 200
+
+                );
                 expect(meta.status).toBe(200);
                 const metadata = meta.data.metadata || meta.data;
                 expect((metadata.owner._id || metadata.owner).toString()).toBe(regularUser.id);
@@ -2522,9 +2552,13 @@ describe('File Routes - HTTP API', () => {
                     destinationPath: destPath
                 });
 
-                await new Promise(resolve => setTimeout(resolve, 2000));
+                const meta = await waitForResponse(
 
-                const meta = await client.get(`/api/v1/files/${encodePath(destPath)}/metadata`);
+                    () => client.get(`/api/v1/files/${encodePath(destPath)}/metadata`),
+
+                    (res) => res.status === 200
+
+                );
                 expect(meta.status).toBe(200);
                 const metadata = meta.data.metadata || meta.data;
                 const readIds = (metadata.permissions?.read || []).map(u => (u._id || u).toString());
@@ -2535,14 +2569,17 @@ describe('File Routes - HTTP API', () => {
 
             test('move within own workspace keeps owner same', async () => {
                 const srcPath = `${creatorRoot}/move-same-ws.txt`;
-                await client.post('/api/v1/files', {
-                    filePath: srcPath,
-                    content: 'Same workspace move',
-                    description: 'Same workspace move'
-                });
-
                 const destDir = `${creatorRoot}/sub-move`;
-                await client.post('/api/v1/files/directory', { dirPath: destDir, description: 'Move target dir' });
+
+                // Independent of each other - issue together
+                await Promise.all([
+                    client.post('/api/v1/files', {
+                        filePath: srcPath,
+                        content: 'Same workspace move',
+                        description: 'Same workspace move'
+                    }),
+                    client.post('/api/v1/files/directory', { dirPath: destDir, description: 'Move target dir' })
+                ]);
 
                 const destPath = `${destDir}/move-same-ws.txt`;
                 const moveResp = await client.post('/api/v1/files/move', {
@@ -2551,9 +2588,13 @@ describe('File Routes - HTTP API', () => {
                 });
                 expect(moveResp.status).toBe(200);
 
-                await new Promise(resolve => setTimeout(resolve, 2000));
+                const meta = await waitForResponse(
 
-                const meta = await client.get(`/api/v1/files/${encodePath(destPath)}/metadata`);
+                    () => client.get(`/api/v1/files/${encodePath(destPath)}/metadata`),
+
+                    (res) => res.status === 200
+
+                );
                 expect(meta.status).toBe(200);
                 const metadata = meta.data.metadata || meta.data;
                 expect((metadata.owner._id || metadata.owner).toString()).toBe(testStartup.creator.id);
@@ -3144,6 +3185,1310 @@ describe('File Routes - HTTP API', () => {
             expect(response.status).toBe(404);
         });
     });
+    });
+
+    // =========================================================================
+    // YJS PERSISTENCE
+    // =========================================================================
+    // The test server runs in-process, so getYjsService() returns the same live
+    // singleton the HTTP layer uses. These drive the persistence API directly:
+    // document naming, content round-trips, metadata, and copy/move/delete.
+    describe('Yjs persistence', () => {
+        let yjsService;
+        let yjsRoot;
+
+        beforeAll(async () => {
+            const mod = await import('../../file-server/middleware/file.middleware.js');
+            yjsService = mod.getYjsService();
+
+            await testStartup.loginAsUser('creator');
+            yjsRoot = `${testRoot}/yjs-persistence`;
+            await client.post('/api/v1/files/directory', {
+                dirPath: yjsRoot,
+                description: 'Yjs persistence tests'
+            });
+        }, 30000);
+
+        describe('document naming', () => {
+            it('should derive a document name from a file path', () => {
+                const name = yjsService.getDocumentName('/alice/notes.md');
+                expect(typeof name).toBe('string');
+                expect(name.length).toBeGreaterThan(0);
+            });
+
+            it('should be stable for the same path', () => {
+                const a = yjsService.getDocumentName('/alice/notes.md');
+                const b = yjsService.getDocumentName('/alice/notes.md');
+                expect(a).toBe(b);
+            });
+
+            it('should differ for different paths', () => {
+                expect(yjsService.getDocumentName('/a/one.md'))
+                    .not.toBe(yjsService.getDocumentName('/a/two.md'));
+            });
+        });
+
+        describe('content round-trip', () => {
+            it('should return the content it was initialised with', async () => {
+                const filePath = `${yjsRoot}/roundtrip.txt`;
+                await client.post('/api/v1/files', {
+                    filePath,
+                    content: 'initial yjs content',
+                    description: 'Yjs round-trip'
+                });
+
+                const content = await yjsService.getTextContent(filePath);
+                expect(content).toContain('initial yjs content');
+            });
+
+            it('should return empty text for a path with no document', async () => {
+                const content = await yjsService.getTextContent(`${yjsRoot}/never-created.txt`);
+                expect(typeof content).toBe('string');
+            });
+
+            it('should expose a Y.Doc for a path', async () => {
+                const filePath = `${yjsRoot}/roundtrip.txt`;
+                const ydoc = await yjsService.getDocument(filePath);
+
+                expect(ydoc).toBeDefined();
+                expect(typeof ydoc.getText).toBe('function');
+                expect(ydoc.getText('content').toString()).toContain('initial yjs content');
+            });
+        });
+
+        describe('getDocumentMetadata', () => {
+            it('should report content presence and a modified timestamp', async () => {
+                const filePath = `${yjsRoot}/roundtrip.txt`;
+                const meta = await yjsService.getDocumentMetadata(filePath);
+
+                expect(meta).toBeDefined();
+                expect(meta.hasContent).toBe(true);
+                expect(meta.lastModified).toBeDefined();
+            });
+
+            it('should report no content for a document that was never written', async () => {
+                const meta = await yjsService.getDocumentMetadata(`${yjsRoot}/empty-doc.txt`);
+
+                expect(meta).toBeDefined();
+                expect(meta.hasContent).toBe(false);
+            });
+
+            it('should return a safe default for a missing file path', async () => {
+                // The handler catches its own guard and degrades rather than
+                // throwing, so callers always receive a usable shape.
+                const meta = await yjsService.getDocumentMetadata('');
+
+                expect(meta.hasContent).toBe(false);
+                expect(meta.contentLength).toBe(0);
+                expect(meta.hasPersistedData).toBe(false);
+                expect(meta.isActive).toBe(false);
+            });
+        });
+
+        describe('getBulkDocumentMetadata', () => {
+            it('should return an entry for each requested path', async () => {
+                const paths = [`${yjsRoot}/roundtrip.txt`, `${yjsRoot}/empty-doc.txt`];
+                const results = await yjsService.getBulkDocumentMetadata(paths);
+
+                expect(Array.isArray(results)).toBe(true);
+                expect(results.length).toBe(paths.length);
+            });
+
+            it('should return an empty array for an empty input', async () => {
+                expect(await yjsService.getBulkDocumentMetadata([])).toEqual([]);
+            });
+
+            it('should return an empty array for a non-array input', async () => {
+                expect(await yjsService.getBulkDocumentMetadata(null)).toEqual([]);
+            });
+
+            it('should tolerate a mix of existing and missing paths', async () => {
+                const results = await yjsService.getBulkDocumentMetadata([
+                    `${yjsRoot}/roundtrip.txt`,
+                    `${yjsRoot}/does-not-exist.txt`
+                ]);
+                expect(Array.isArray(results)).toBe(true);
+            });
+        });
+
+        describe('copy, move and delete', () => {
+            it('should copy a document to a new path', async () => {
+                const from = `${yjsRoot}/copy-src.txt`;
+                const to = `${yjsRoot}/copy-dst.txt`;
+
+                await client.post('/api/v1/files', {
+                    filePath: from,
+                    content: 'content to copy',
+                    description: 'Copy source'
+                });
+
+                await yjsService.copyDocument(from, to);
+                expect(await yjsService.getTextContent(to)).toContain('content to copy');
+                // Source survives a copy
+                expect(await yjsService.getTextContent(from)).toContain('content to copy');
+            });
+
+            it('should move a document, leaving the source empty', async () => {
+                const from = `${yjsRoot}/move-src.txt`;
+                const to = `${yjsRoot}/move-dst.txt`;
+
+                await client.post('/api/v1/files', {
+                    filePath: from,
+                    content: 'content to move',
+                    description: 'Move source'
+                });
+
+                await yjsService.moveDocument(from, to);
+                expect(await yjsService.getTextContent(to)).toContain('content to move');
+            });
+
+            it('should delete a document', async () => {
+                const filePath = `${yjsRoot}/delete-me.txt`;
+                await client.post('/api/v1/files', {
+                    filePath,
+                    content: 'content to delete',
+                    description: 'Delete target'
+                });
+
+                await yjsService.deleteDocument(filePath);
+                const after = await yjsService.getTextContent(filePath);
+                expect(after).not.toContain('content to delete');
+            });
+        });
+
+        describe('service accessors', () => {
+            it('should expose the persistence layer once initialised', () => {
+                expect(yjsService.isInitialized).toBe(true);
+                expect(yjsService.getPersistence()).toBeTruthy();
+            });
+
+            it('should report Redis statistics', () => {
+                const stats = yjsService.getRedisStats();
+                expect(stats).toBeDefined();
+            });
+
+            it('should report Redis health as healthy while enabled', async () => {
+                const health = await yjsService.redisHealthCheck();
+                expect(health).toBeDefined();
+                expect(health.status).toBe('healthy');
+            });
+
+            it('should expose the Redis adapter while enabled', () => {
+                expect(yjsService.getRedisAdapter()).toBeTruthy();
+            });
+        });
+    });
+
+    // =========================================================================
+    // COMPRESSION HELPERS
+    // =========================================================================
+    // Pure functions, exercised directly: driving every branch through uploads
+    // would cost seconds per case for no extra confidence.
+    describe('Compression helpers', () => {
+        let shouldCompressFile;
+        let compressFileBuffer;
+        let decompressFileBuffer;
+        let getCompressionStats;
+        let COMPRESSION_CONFIG;
+
+        beforeAll(async () => {
+            const mod = await import('../../file-server/middleware/file.middleware.js');
+            shouldCompressFile = mod.shouldCompressFile;
+            compressFileBuffer = mod.compressFileBuffer;
+            decompressFileBuffer = mod.decompressFileBuffer;
+            getCompressionStats = mod.getCompressionStats;
+            COMPRESSION_CONFIG = mod.COMPRESSION_CONFIG;
+        });
+
+        describe('shouldCompressFile', () => {
+            it('should refuse anything below the minimum size', () => {
+                const belowMin = COMPRESSION_CONFIG.minSizeForCompression - 1;
+                expect(shouldCompressFile('text/plain', belowMin)).toBe(false);
+            });
+
+            it('should accept a compressible type at or above the minimum size', () => {
+                const atMin = COMPRESSION_CONFIG.minSizeForCompression;
+                expect(shouldCompressFile('text/plain', atMin)).toBe(true);
+                expect(shouldCompressFile('application/json', atMin * 10)).toBe(true);
+            });
+
+            it('should refuse already-compressed formats regardless of size', () => {
+                const big = COMPRESSION_CONFIG.minSizeForCompression * 100;
+                for (const mime of ['image/jpeg', 'image/png', 'video/mp4', 'audio/mpeg', 'application/zip', 'application/gzip']) {
+                    expect(shouldCompressFile(mime, big), `${mime} should not be compressed`).toBe(false);
+                }
+            });
+
+            it('should refuse a type that is neither compressible nor listed', () => {
+                const big = COMPRESSION_CONFIG.minSizeForCompression * 10;
+                expect(shouldCompressFile('application/x-unknown-binary', big)).toBe(false);
+            });
+        });
+
+        describe('compressFileBuffer', () => {
+            it('should pass through a buffer that is too small to compress', async () => {
+                const buffer = Buffer.from('tiny');
+                const result = await compressFileBuffer(buffer, 'text/plain', 'tiny.txt');
+
+                expect(result.compressed).toBe(false);
+                expect(result.algorithm).toBe('none');
+                expect(result.contentEncoding).toBeNull();
+                expect(result.buffer).toBe(buffer);
+                expect(result.compressionRatio).toBe(1);
+            });
+
+            it('should pass through an already-compressed type', async () => {
+                const buffer = Buffer.alloc(COMPRESSION_CONFIG.minSizeForCompression * 4, 0x42);
+                const result = await compressFileBuffer(buffer, 'image/jpeg', 'photo.jpg');
+
+                expect(result.compressed).toBe(false);
+                expect(result.algorithm).toBe('none');
+            });
+
+            it('should compress highly repetitive text and report a ratio', async () => {
+                const buffer = Buffer.from('a'.repeat(COMPRESSION_CONFIG.minSizeForCompression * 20));
+                const result = await compressFileBuffer(buffer, 'text/plain', 'repetitive.txt');
+
+                expect(result.compressed).toBe(true);
+                expect(result.algorithm).not.toBe('none');
+                expect(result.compressedSize).toBeLessThan(result.originalSize);
+                expect(result.compressionRatio).toBeLessThan(1);
+                expect(result.contentEncoding).toBeTruthy();
+            });
+
+            it('should decline to keep a compression that saves too little', async () => {
+                // Random bytes are incompressible, so the ratio gate should reject the result
+                const buffer = Buffer.alloc(COMPRESSION_CONFIG.minSizeForCompression * 4);
+                for (let i = 0; i < buffer.length; i++) {
+                    buffer[i] = Math.floor(Math.random() * 256);
+                }
+
+                const result = await compressFileBuffer(buffer, 'text/plain', 'random.txt');
+                expect(result.compressed).toBe(false);
+            });
+        });
+
+        describe('compress and decompress round-trip', () => {
+            it('should return the original bytes after a round-trip', async () => {
+                const original = Buffer.from('round trip payload '.repeat(200));
+                const compressed = await compressFileBuffer(original, 'text/plain', 'roundtrip.txt');
+
+                expect(compressed.compressed).toBe(true);
+
+                const restored = await decompressFileBuffer(
+                    compressed.buffer,
+                    compressed.algorithm,
+                    'roundtrip.txt'
+                );
+
+                expect(Buffer.compare(restored, original)).toBe(0);
+            });
+
+            it('should return the buffer untouched for algorithm "none"', async () => {
+                const buffer = Buffer.from('not compressed');
+                const restored = await decompressFileBuffer(buffer, 'none', 'plain.txt');
+
+                expect(Buffer.compare(restored, buffer)).toBe(0);
+            });
+        });
+
+        describe('getCompressionStats', () => {
+            it('should report the configured thresholds and algorithms', () => {
+                const stats = getCompressionStats();
+
+                expect(stats).toBeDefined();
+                expect(typeof stats).toBe('object');
+            });
+        });
+    });
+
+    // =========================================================================
+    // BLOCKED FILE EXTENSIONS
+    // =========================================================================
+    // BLOCKED_FILE_EXTENSIONS is enforced in multer's fileFilter. A rejected
+    // upload is a client error, so it must come back as 4xx - not a 500.
+    describe('Blocked file extensions', () => {
+        let blockRoot;
+
+        beforeAll(async () => {
+            await testStartup.loginAsUser('creator');
+            blockRoot = `${testRoot}/blocked-uploads`;
+            await client.post('/api/v1/files/directory', {
+                dirPath: blockRoot,
+                description: 'Blocked extension tests'
+            });
+        }, 30000);
+
+        it('should reject a blocked extension with a client error', async () => {
+            await testStartup.loginAsUser('creator');
+            const response = await uploadFile(
+                Buffer.from('MZ fake executable'),
+                'malware.exe',
+                blockRoot,
+                'application/octet-stream',
+                true
+            );
+
+            expect(response.status).toBeGreaterThanOrEqual(400);
+            expect(response.status).toBeLessThan(500);
+            expect(response.data.success).toBe(false);
+        });
+
+        it('should name the offending extension in the message', async () => {
+            await testStartup.loginAsUser('creator');
+            const response = await uploadFile(
+                Buffer.from('@echo off'),
+                'script.bat',
+                blockRoot,
+                'application/octet-stream',
+                true
+            );
+
+            expect(response.status).toBeLessThan(500);
+            expect(JSON.stringify(response.data)).toMatch(/\.bat|not allowed/i);
+        });
+
+        it('should block every configured extension', async () => {
+            await testStartup.loginAsUser('creator');
+            const blocked = process.env.BLOCKED_FILE_EXTENSIONS.split(',').map(e => e.trim());
+
+            for (const ext of blocked) {
+                const response = await uploadFile(
+                    Buffer.from('payload'),
+                    `sample${ext}`,
+                    blockRoot,
+                    'application/octet-stream',
+                    true
+                );
+
+                expect(response.status, `${ext} should be rejected as a client error`).toBeLessThan(500);
+                expect(response.status, `${ext} should be rejected`).toBeGreaterThanOrEqual(400);
+            }
+        });
+
+        it('should still accept an allowed extension', async () => {
+            await testStartup.loginAsUser('creator');
+            const response = await uploadFile(
+                Buffer.from('harmless text'),
+                'allowed.txt',
+                blockRoot,
+                'text/plain',
+                true
+            );
+
+            expect([200, 201]).toContain(response.status);
+        });
+    });
+
+    // =========================================================================
+    // PERMISSION CASCADE ON DIRECTORIES
+    // =========================================================================
+    // Sharing a directory cascades to its children; unsharing removes them
+    // again. These drive File.cascadePermissionsToChildren and
+    // removePermissionsFromChildren, which the HTTP tests only reach partially.
+    describe('Directory permission cascade', () => {
+        let cascadeRoot;
+        let nestedFile;
+
+        beforeAll(async () => {
+            await testStartup.loginAsUser('creator');
+            const stamp = Date.now();
+            cascadeRoot = `${testRoot}/cascade-${stamp}`;
+            nestedFile = `${cascadeRoot}/inner/nested.txt`;
+
+            await client.post('/api/v1/files/directory', {dirPath: cascadeRoot, description: 'Cascade root'});
+            await client.post('/api/v1/files/directory', {dirPath: `${cascadeRoot}/inner`, description: 'Inner'});
+            await client.post('/api/v1/files', {
+                filePath: nestedFile,
+                content: 'nested content',
+                description: 'Nested file'
+            });
+        }, 30000);
+
+        it('should cascade read permission from a directory to its children', async () => {
+            await testStartup.loginAsUser('creator');
+            const response = await client.post(`/api/v1/files/${encodePath(cascadeRoot)}/share`, {
+                userIds: [testStartup.user.id],
+                permission: 'read'
+            });
+
+            expect([200, 201]).toContain(response.status);
+
+            // The nested file should now be readable by the shared user
+            await testStartup.loginAsUser('user');
+            const nested = await waitForResponse(
+                () => client.get(`/api/v1/files/${encodePath(nestedFile)}/metadata`),
+                (res) => res.status === 200
+            );
+            expect(nested.status).toBe(200);
+        });
+
+        it('should remove cascaded permission from children on unshare', async () => {
+            await testStartup.loginAsUser('creator');
+            const response = await client.delete(`/api/v1/files/${encodePath(cascadeRoot)}/share`, {
+                data: {
+                    userIds: [testStartup.user.id],
+                    permission: 'both'
+                }
+            });
+
+            expect([200, 201]).toContain(response.status);
+
+            // Access should be revoked on the descendant as well
+            await testStartup.loginAsUser('user');
+            const nested = await waitForResponse(
+                () => client.get(`/api/v1/files/${encodePath(nestedFile)}/metadata`),
+                (res) => res.status === 403 || res.status === 404
+            );
+            expect([403, 404]).toContain(nested.status);
+        });
+
+        it('should reject sharing with an empty user list', async () => {
+            await testStartup.loginAsUser('creator');
+            const response = await client.post(`/api/v1/files/${encodePath(cascadeRoot)}/share`, {
+                userIds: [],
+                permission: 'read'
+            });
+
+            expect([400, 200]).toContain(response.status);
+        });
+
+        it('should reject an unknown permission value', async () => {
+            await testStartup.loginAsUser('creator');
+            const response = await client.post(`/api/v1/files/${encodePath(cascadeRoot)}/share`, {
+                userIds: [testStartup.user.id],
+                permission: 'teleport'
+            });
+
+            expect([400, 422]).toContain(response.status);
+        });
+    });
+
+    // =========================================================================
+    // TREE FILTERING, RECURSIVE DELETE, RANGE REQUESTS
+    // =========================================================================
+    describe('Tree filtering, recursive delete and range requests', () => {
+        let advRoot;
+
+        beforeAll(async () => {
+            await testStartup.loginAsUser('creator');
+            advRoot = `${testRoot}/advanced-ops`;
+            await client.post('/api/v1/files/directory', {dirPath: advRoot, description: 'Advanced ops'});
+            await client.post('/api/v1/files/directory', {dirPath: `${advRoot}/branch`, description: 'Branch'});
+            await client.post('/api/v1/files', {
+                filePath: `${advRoot}/branch/leaf.txt`,
+                content: 'leaf content',
+                description: 'Leaf file'
+            });
+        }, 30000);
+
+        describe('tree filtering', () => {
+            it('should return directories only when includeFiles=false', async () => {
+                await testStartup.loginAsUser('creator');
+                const response = await client.get(
+                    `/api/v1/files/tree?rootPath=${encodePath(advRoot)}&format=object&includeFiles=false`
+                );
+
+                expect(response.status).toBe(200);
+
+                // No node anywhere in the returned tree should be a file
+                const assertNoFiles = (node) => {
+                    if (!node || typeof node !== 'object') return;
+                    if (node.type && node.type !== 'directory') {
+                        throw new Error(`found a non-directory node: ${node.type}`);
+                    }
+                    for (const child of Object.values(node.children || {})) {
+                        assertNoFiles(child);
+                    }
+                };
+
+                const tree = response.data.tree || response.data;
+                expect(() => Object.values(tree).forEach(assertNoFiles)).not.toThrow();
+            });
+
+            it('should include files by default', async () => {
+                await testStartup.loginAsUser('creator');
+                const response = await client.get(
+                    `/api/v1/files/tree?rootPath=${encodePath(advRoot)}&format=object`
+                );
+
+                expect(response.status).toBe(200);
+            });
+
+            it('should support array format', async () => {
+                await testStartup.loginAsUser('creator');
+                const response = await client.get(
+                    `/api/v1/files/tree?rootPath=${encodePath(advRoot)}&format=array`
+                );
+
+                expect(response.status).toBe(200);
+            });
+        });
+
+        describe('recursive directory delete', () => {
+            it('should delete a directory and its descendants', async () => {
+                await testStartup.loginAsUser('creator');
+                const stamp = Date.now();
+                const parent = `${advRoot}/to-delete-${stamp}`;
+                const child = `${parent}/nested`;
+
+                await client.post('/api/v1/files/directory', {dirPath: parent, description: 'Delete parent'});
+                await client.post('/api/v1/files/directory', {dirPath: child, description: 'Delete child'});
+                await client.post('/api/v1/files', {
+                    filePath: `${child}/doomed.txt`,
+                    content: 'will be removed',
+                    description: 'Doomed file'
+                });
+
+                const response = await client.delete(`/api/v1/files/${encodePath(parent)}`);
+                expect([200, 204]).toContain(response.status);
+
+                // The descendant must be gone too
+                const descendant = await waitForResponse(
+                    () => client.get(`/api/v1/files/${encodePath(`${child}/doomed.txt`)}/metadata`),
+                    (res) => res.status === 404
+                );
+                expect(descendant.status).toBe(404);
+            });
+        });
+
+        describe('download range requests', () => {
+            let binaryPath;
+
+            beforeAll(async () => {
+                await testStartup.loginAsUser('creator');
+                const buffer = Buffer.from('0123456789abcdefghijklmnopqrstuvwxyz');
+                const res = await uploadFile(buffer, 'ranged.bin', advRoot, 'application/octet-stream', true);
+                expect([200, 201]).toContain(res.status);
+                binaryPath = `${advRoot}/ranged.bin`;
+            }, 30000);
+
+            it('should download the whole file without a range header', async () => {
+                await testStartup.loginAsUser('creator');
+                const response = await client.get(`/api/v1/files/${encodePath(binaryPath)}/download`);
+
+                expect([200, 206]).toContain(response.status);
+            });
+
+            it('should honour a byte range', async () => {
+                await testStartup.loginAsUser('creator');
+                const response = await client.get(
+                    `/api/v1/files/${encodePath(binaryPath)}/download`,
+                    {headers: {Range: 'bytes=0-9'}}
+                );
+
+                expect([200, 206]).toContain(response.status);
+            });
+
+            it('should reject a range beyond the end of the file', async () => {
+                await testStartup.loginAsUser('creator');
+                const response = await client.get(
+                    `/api/v1/files/${encodePath(binaryPath)}/download`,
+                    {headers: {Range: 'bytes=99999-100000'}}
+                );
+
+                expect([206, 416, 200]).toContain(response.status);
+            });
+
+            it('should require authentication', async () => {
+                client.clearCookies();
+                const response = await client.get(`/api/v1/files/${encodePath(binaryPath)}/download`);
+
+                expect(response.status).toBe(401);
+            });
+        });
+    });
+
+    // =========================================================================
+    // DIRECTORY CONTENTS AND STATS
+    // =========================================================================
+    describe('Directory contents and stats', () => {
+        let dirRoot;
+
+        beforeAll(async () => {
+            await testStartup.loginAsUser('creator');
+            dirRoot = `${testRoot}/dir-listing`;
+            await client.post('/api/v1/files/directory', {
+                dirPath: dirRoot,
+                description: 'Directory listing tests'
+            });
+            await client.post('/api/v1/files/directory', {
+                dirPath: `${dirRoot}/child`,
+                description: 'Child directory'
+            });
+            await client.post('/api/v1/files', {
+                filePath: `${dirRoot}/listed.txt`,
+                content: 'listed file content',
+                description: 'A listed file'
+            });
+        }, 30000);
+
+        describe('GET /api/v1/files/directory/contents', () => {
+            it('should list the entries of a directory', async () => {
+                await testStartup.loginAsUser('creator');
+                const response = await client.get(
+                    `/api/v1/files/directory/contents?filePath=${encodePath(dirRoot)}`
+                );
+
+                expect(response.status).toBe(200);
+                expect(response.data.success).toBe(true);
+            });
+
+            it('should require authentication', async () => {
+                client.clearCookies();
+                const response = await client.get(
+                    `/api/v1/files/directory/contents?filePath=${encodePath(dirRoot)}`
+                );
+
+                expect(response.status).toBe(401);
+            });
+
+            it('should handle a directory that does not exist', async () => {
+                await testStartup.loginAsUser('creator');
+                const response = await client.get(
+                    `/api/v1/files/directory/contents?filePath=${encodePath(`${dirRoot}/absent`)}`
+                );
+
+                expect([200, 404]).toContain(response.status);
+            });
+        });
+
+        describe('GET /api/v1/files/directory/stats', () => {
+            it('should return statistics for a directory', async () => {
+                await testStartup.loginAsUser('creator');
+                const response = await client.get(
+                    `/api/v1/files/directory/stats?filePath=${encodePath(dirRoot)}`
+                );
+
+                expect(response.status).toBe(200);
+                expect(response.data.success).toBe(true);
+            });
+
+            it('should deny a non-admin asking for root statistics', async () => {
+                await testStartup.loginAsUser('user');
+                const response = await client.get(
+                    `/api/v1/files/directory/stats?filePath=${encodePath('/')}`
+                );
+
+                expect([403, 200]).toContain(response.status);
+            });
+
+            it('should allow an admin to ask for root statistics', async () => {
+                await testStartup.loginAsUser('admin');
+                const response = await client.get(
+                    `/api/v1/files/directory/stats?filePath=${encodePath('/')}`
+                );
+
+                expect(response.status).toBe(200);
+            });
+
+            it('should require authentication', async () => {
+                client.clearCookies();
+                const response = await client.get(
+                    `/api/v1/files/directory/stats?filePath=${encodePath(dirRoot)}`
+                );
+
+                expect(response.status).toBe(401);
+            });
+        });
+    });
+
+    // =========================================================================
+    // UPDATE FILE METADATA
+    // =========================================================================
+    // PUT /:filePath/metadata carries the widest branch surface in the
+    // controller: rename with extension preservation, tags, description, and
+    // media metadata with its own validation rules.
+    describe('PUT /api/v1/files/:filePath/metadata', () => {
+        let metaRoot;
+
+        beforeAll(async () => {
+            await testStartup.loginAsUser('creator');
+            metaRoot = `${testRoot}/metadata-updates`;
+            await client.post('/api/v1/files/directory', {
+                dirPath: metaRoot,
+                description: 'Metadata update tests'
+            });
+        }, 30000);
+
+        const makeFile = async (name, content = 'metadata test content') => {
+            const filePath = `${metaRoot}/${name}`;
+            const res = await client.post('/api/v1/files', {
+                filePath,
+                content,
+                description: 'Original description'
+            });
+            expect([200, 201]).toContain(res.status);
+            return filePath;
+        };
+
+        it('should update the description', async () => {
+            await testStartup.loginAsUser('creator');
+            const filePath = await makeFile(`desc-${Date.now()}.txt`);
+
+            const response = await client.put(`/api/v1/files/${encodePath(filePath)}/metadata`, {
+                description: 'Updated description'
+            });
+
+            expect(response.status).toBe(200);
+            expect(response.data.success).toBe(true);
+
+            const meta = await client.get(`/api/v1/files/${encodePath(filePath)}/metadata`);
+            expect((meta.data.metadata || meta.data).description).toBe('Updated description');
+        });
+
+        it('should update tags', async () => {
+            await testStartup.loginAsUser('creator');
+            const filePath = await makeFile(`tags-${Date.now()}.txt`);
+
+            const response = await client.put(`/api/v1/files/${encodePath(filePath)}/metadata`, {
+                tags: ['alpha', 'beta']
+            });
+
+            expect(response.status).toBe(200);
+
+            const meta = await client.get(`/api/v1/files/${encodePath(filePath)}/metadata`);
+            expect((meta.data.metadata || meta.data).tags).toEqual(expect.arrayContaining(['alpha', 'beta']));
+        });
+
+        it('should rename a file via fileName', async () => {
+            await testStartup.loginAsUser('creator');
+            const stamp = Date.now();
+            const filePath = await makeFile(`rename-src-${stamp}.txt`);
+            const newName = `rename-dst-${stamp}.txt`;
+
+            const response = await client.put(`/api/v1/files/${encodePath(filePath)}/metadata`, {
+                fileName: newName
+            });
+
+            expect(response.status).toBe(200);
+
+            const moved = await waitForResponse(
+                () => client.get(`/api/v1/files/${encodePath(`${metaRoot}/${newName}`)}/metadata`),
+                (res) => res.status === 200
+            );
+            expect(moved.status).toBe(200);
+        });
+
+        it('should preserve the extension when renaming without one', async () => {
+            await testStartup.loginAsUser('creator');
+            const stamp = Date.now();
+            const filePath = await makeFile(`keepext-src-${stamp}.txt`);
+            const bareName = `keepext-dst-${stamp}`;
+
+            const response = await client.put(`/api/v1/files/${encodePath(filePath)}/metadata`, {
+                fileName: bareName
+            });
+
+            expect(response.status).toBe(200);
+
+            // The .txt extension should have been re-appended
+            const withExt = await waitForResponse(
+                () => client.get(`/api/v1/files/${encodePath(`${metaRoot}/${bareName}.txt`)}/metadata`),
+                (res) => res.status === 200
+            );
+            expect(withExt.status).toBe(200);
+        });
+
+        it('should reject a rename onto an existing file', async () => {
+            await testStartup.loginAsUser('creator');
+            const stamp = Date.now();
+            const source = await makeFile(`clash-a-${stamp}.txt`);
+            const occupiedName = `clash-b-${stamp}.txt`;
+            await makeFile(occupiedName);
+
+            const response = await client.put(`/api/v1/files/${encodePath(source)}/metadata`, {
+                fileName: occupiedName
+            });
+
+            expect([400, 409]).toContain(response.status);
+            expect(response.data.success).toBe(false);
+        });
+
+        it('should reject media metadata on a non-media file', async () => {
+            await testStartup.loginAsUser('creator');
+            const filePath = await makeFile(`notmedia-${Date.now()}.txt`);
+
+            const response = await client.put(`/api/v1/files/${encodePath(filePath)}/metadata`, {
+                mediaMetadata: {artist: 'Nobody'}
+            });
+
+            expect(response.status).toBe(400);
+            expect(response.data.message).toMatch(/audio or video/i);
+        });
+
+        it('should return 404 for a file that does not exist', async () => {
+            await testStartup.loginAsUser('creator');
+            const response = await client.put(
+                `/api/v1/files/${encodePath(`${metaRoot}/absent-${Date.now()}.txt`)}/metadata`,
+                {description: 'nothing here'}
+            );
+
+            expect(response.status).toBe(404);
+            expect(response.data.success).toBe(false);
+        });
+
+        it('should require authentication', async () => {
+            client.clearCookies();
+            const response = await client.put(
+                `/api/v1/files/${encodePath(`${metaRoot}/whatever.txt`)}/metadata`,
+                {description: 'x'}
+            );
+
+            expect(response.status).toBe(401);
+        });
+
+        it('should deny a user without write permission', async () => {
+            await testStartup.loginAsUser('creator');
+            const filePath = await makeFile(`denied-${Date.now()}.txt`);
+
+            await testStartup.loginAsUser('user');
+            const response = await client.put(`/api/v1/files/${encodePath(filePath)}/metadata`, {
+                description: 'should not apply'
+            });
+
+            expect([403, 404]).toContain(response.status);
+            expect(response.data.success).toBe(false);
+        });
+    });
+
+    // =========================================================================
+    // ZIP EXTRACTION
+    // =========================================================================
+    // POST /api/v1/files/extract-zip had no tests at all. It writes files from
+    // an uploaded archive into the user's workspace, so entry names are
+    // attacker-controlled input and containment matters.
+    describe('Zip extraction', () => {
+        let zipRoot;
+
+        beforeAll(async () => {
+            await testStartup.loginAsUser('creator');
+            zipRoot = `${testRoot}/zips`;
+            await client.post('/api/v1/files/directory', {
+                dirPath: zipRoot,
+                description: 'Zip extraction tests'
+            });
+        }, 30000);
+
+        /** Build a zip in memory and upload it, returning its stored path. */
+        const uploadZip = async (name, entries) => {
+            const zip = new JSZip();
+            for (const [entryName, content] of Object.entries(entries)) {
+                zip.file(entryName, content);
+            }
+            const buffer = await zip.generateAsync({type: 'nodebuffer'});
+
+            const response = await uploadFile(buffer, name, zipRoot, 'application/zip', true);
+            expect([200, 201]).toContain(response.status);
+            return `${zipRoot}/${name}`;
+        };
+
+        it('should reject a request with no filePath', async () => {
+            await testStartup.loginAsUser('creator');
+            const response = await client.post('/api/v1/files/extract-zip', {});
+
+            expect(response.status).toBe(400);
+            expect(response.data.success).toBe(false);
+        });
+
+        it('should return 404 for a zip that does not exist', async () => {
+            await testStartup.loginAsUser('creator');
+            const response = await client.post('/api/v1/files/extract-zip', {
+                filePath: `${zipRoot}/no-such-archive.zip`,
+                targetPath: zipRoot
+            });
+
+            expect(response.status).toBe(404);
+            expect(response.data.success).toBe(false);
+        });
+
+        it('should reject extracting something that is not a binary file', async () => {
+            await testStartup.loginAsUser('creator');
+            const textPath = `${zipRoot}/not-a-zip.txt`;
+            await client.post('/api/v1/files', {
+                filePath: textPath,
+                content: 'plain text, not an archive',
+                description: 'Not a zip'
+            });
+
+            const response = await client.post('/api/v1/files/extract-zip', {
+                filePath: textPath,
+                targetPath: zipRoot
+            });
+
+            expect(response.status).toBe(400);
+            expect(response.data.success).toBe(false);
+        });
+
+        it('should extract a flat archive into a folder named after the zip', async () => {
+            await testStartup.loginAsUser('creator');
+            const zipPath = await uploadZip('flat.zip', {
+                'one.txt': 'first entry',
+                'two.txt': 'second entry'
+            });
+
+            const response = await client.post('/api/v1/files/extract-zip', {
+                filePath: zipPath,
+                targetPath: zipRoot
+            });
+
+            expect(response.status).toBe(200);
+            expect(response.data.success).toBe(true);
+
+            const extracted = await waitForResponse(
+                () => client.get(`/api/v1/files/${encodePath(`${zipRoot}/flat/one.txt`)}/metadata`),
+                (res) => res.status === 200
+            );
+            expect(extracted.status).toBe(200);
+        });
+
+        it('should recreate nested directories from the archive', async () => {
+            await testStartup.loginAsUser('creator');
+            const zipPath = await uploadZip('nested.zip', {
+                'docs/readme.txt': 'nested entry',
+                'docs/deeper/notes.txt': 'deeper entry'
+            });
+
+            const response = await client.post('/api/v1/files/extract-zip', {
+                filePath: zipPath,
+                targetPath: zipRoot
+            });
+
+            expect(response.status).toBe(200);
+
+            const deep = await waitForResponse(
+                () => client.get(`/api/v1/files/${encodePath(`${zipRoot}/nested/docs/deeper/notes.txt`)}/metadata`),
+                (res) => res.status === 200
+            );
+            expect(deep.status).toBe(200);
+        });
+
+        // Traversal entry names cannot reach the extraction logic: JSZip
+        // normalises them away in loadAsync, so a crafted '../../evil.txt' is
+        // read back as 'evil.txt'. This asserts that containment property
+        // directly, since it is the library — not this codebase — that provides it.
+        it('should confine every extracted entry to the extraction directory', async () => {
+            const JSZipLib = require('jszip');
+
+            const zip = new JSZipLib();
+            zip.file('safe.txt', 'inside');
+            zip.file('placeholder.txt', 'crafted');
+            let buffer = await zip.generateAsync({type: 'nodebuffer'});
+
+            // Patch the stored name to a traversal path of identical length so
+            // the archive's byte offsets stay valid.
+            const from = Buffer.from('placeholder.txt');
+            const to = Buffer.from('../../evil2.txt');
+            let at = 0;
+            while ((at = buffer.indexOf(from, at)) !== -1) {
+                to.copy(buffer, at);
+                at += to.length;
+            }
+
+            const reloaded = await JSZipLib.loadAsync(buffer);
+            for (const name of Object.keys(reloaded.files)) {
+                expect(name.includes('..'), `entry "${name}" must not contain a traversal segment`).toBe(false);
+            }
+        });
+
+        it('should skip macOS resource forks', async () => {
+            await testStartup.loginAsUser('creator');
+            const zipPath = await uploadZip('macos.zip', {
+                'real.txt': 'keep me',
+                '__MACOSX/._real.txt': 'resource fork'
+            });
+
+            const response = await client.post('/api/v1/files/extract-zip', {
+                filePath: zipPath,
+                targetPath: zipRoot
+            });
+
+            expect(response.status).toBe(200);
+
+            const fork = await client.get(`/api/v1/files/${encodePath(`${zipRoot}/macos/__MACOSX/._real.txt`)}/metadata`);
+            expect(fork.status).toBe(404);
+        });
+
+        it('should require authentication', async () => {
+            client.clearCookies();
+            const response = await client.post('/api/v1/files/extract-zip', {
+                filePath: `${zipRoot}/flat.zip`,
+                targetPath: zipRoot
+            });
+
+            expect(response.status).toBe(401);
+        });
+    });
+
+    // =========================================================================
+    // SUPPORTED TYPES
+    // =========================================================================
+    describe('GET /api/v1/files/supported-types', () => {
+        it('should list the supported text and binary categories', async () => {
+            await testStartup.loginAsUser('user');
+            const response = await client.get('/api/v1/files/supported-types');
+
+            expect(response.status).toBe(200);
+            expect(response.data.success).toBe(true);
+
+            const payload = response.data.supportedTypes || response.data.types || response.data.data;
+            expect(payload).toBeDefined();
+        });
+    });
+
+    // =========================================================================
+    // NOTIFICATION WEBSOCKET AUTHENTICATION
+    // =========================================================================
+    // The /notifications socket authenticates by JWT before accepting a client.
+    // Every rejection path closes with 1008; these assert it actually does,
+    // since a socket that fails open would leak file events to anyone.
+    describe('Notification WebSocket authentication', () => {
+        const WebSocket = require('ws');
+        const jwt = require('jsonwebtoken');
+
+        /**
+         * Open a socket and resolve with how it ended:
+         * either an established connection or a close code and reason.
+         */
+        const connect = (query) => new Promise((resolve) => {
+            const url = `ws://localhost:${testStartup.port}/notifications${query}`;
+            const ws = new WebSocket(url);
+            let settled = false;
+
+            const finish = (result) => {
+                if (settled) return;
+                settled = true;
+                clearTimeout(timer);
+                try { ws.close(); } catch { /* already closing */ }
+                resolve(result);
+            };
+
+            const timer = setTimeout(() => finish({outcome: 'timeout'}), 6000);
+
+            ws.on('message', (raw) => {
+                try {
+                    const msg = JSON.parse(raw.toString());
+                    if (msg.type === 'connection:established') {
+                        finish({outcome: 'established', data: msg.data});
+                    }
+                } catch { /* non-JSON frames are not relevant here */ }
+            });
+
+            ws.on('close', (code, reason) => {
+                finish({outcome: 'closed', code, reason: reason?.toString() ?? ''});
+            });
+
+            ws.on('error', () => { /* close carries the detail we assert on */ });
+        });
+
+        it('should reject a connection with no token', async () => {
+            const result = await connect('');
+
+            expect(result.outcome).toBe('closed');
+            expect(result.code).toBe(1008);
+            expect(result.reason).toMatch(/token required/i);
+        });
+
+        it('should reject a malformed token', async () => {
+            const result = await connect('?token=not-a-real-jwt');
+
+            expect(result.outcome).toBe('closed');
+            expect(result.code).toBe(1008);
+            expect(result.reason).toMatch(/invalid authentication token/i);
+        });
+
+        it('should reject a token signed with the wrong secret', async () => {
+            const forged = jwt.sign(
+                {id: testStartup.user.id, username: 'forged'},
+                'this-is-not-the-access-token-secret',
+                {expiresIn: '5m'}
+            );
+
+            const result = await connect(`?token=${forged}`);
+
+            expect(result.outcome).toBe('closed');
+            expect(result.code).toBe(1008);
+            expect(result.reason).toMatch(/invalid authentication token/i);
+        });
+
+        it('should reject an expired token', async () => {
+            const expired = jwt.sign(
+                {id: testStartup.user.id, username: 'expired'},
+                process.env.ACCESS_TOKEN_SECRET,
+                {expiresIn: '-1s'}
+            );
+
+            const result = await connect(`?token=${expired}`);
+
+            expect(result.outcome).toBe('closed');
+            expect(result.code).toBe(1008);
+        });
+
+        it('should accept a validly signed token', async () => {
+            const valid = jwt.sign(
+                {id: testStartup.user.id, username: testStartup.user.username},
+                process.env.ACCESS_TOKEN_SECRET,
+                {expiresIn: '5m'}
+            );
+
+            const result = await connect(`?token=${valid}`);
+
+            expect(result.outcome).toBe('established');
+            expect(result.data.userId).toBe(testStartup.user.id);
+        });
+    });
+
+    // =========================================================================
+    // FILE MODEL STATICS
+    // =========================================================================
+    // Pure classification and validation helpers on the schema - no documents,
+    // no queries. These carry most of the model's uncovered branches.
+    describe('File model statics', () => {
+        let File;
+
+        beforeAll(async () => {
+            const mod = await import('../../file-server/models/file.model.js');
+            File = mod.default;
+        });
+
+        describe('validatePath', () => {
+            it('should accept absolute paths and the root', () => {
+                expect(File.validatePath('/')).toBe(true);
+                expect(File.validatePath('/docs/report.txt')).toBe(true);
+                expect(File.validatePath('/a/b/c/d.md')).toBe(true);
+            });
+
+            it('should reject non-string and empty input', () => {
+                expect(File.validatePath(null)).toBe(false);
+                expect(File.validatePath(undefined)).toBe(false);
+                expect(File.validatePath('')).toBe(false);
+                expect(File.validatePath(42)).toBe(false);
+                expect(File.validatePath({})).toBe(false);
+            });
+
+            it('should reject relative paths', () => {
+                expect(File.validatePath('docs/report.txt')).toBe(false);
+                expect(File.validatePath('./report.txt')).toBe(false);
+            });
+
+            it('should reject double slashes', () => {
+                expect(File.validatePath('/docs//report.txt')).toBe(false);
+            });
+
+            it('should reject a trailing slash except on root', () => {
+                expect(File.validatePath('/docs/')).toBe(false);
+                expect(File.validatePath('/')).toBe(true);
+            });
+
+            it('should reject embedded null bytes', () => {
+                expect(File.validatePath('/docs/re\0port.txt')).toBe(false);
+            });
+        });
+
+        describe('getFileType', () => {
+            it('should classify known text extensions as text', () => {
+                for (const name of ['notes.md', 'app.js', 'data.json', 'styles.css', 'query.sql']) {
+                    expect(File.getFileType(name), `${name} should be text`).toBe('text');
+                }
+            });
+
+            it('should classify known binary extensions as binary', () => {
+                const binaryExts = File.getBinaryExtensions();
+                const sample = binaryExts.slice(0, 5);
+
+                for (const ext of sample) {
+                    expect(File.getFileType(`sample.${ext}`), `.${ext} should be binary`).toBe('binary');
+                }
+            });
+
+            it('should default to binary when no filename is supplied', () => {
+                expect(File.getFileType(null)).toBe('binary');
+                expect(File.getFileType('')).toBe('binary');
+            });
+
+            it('should be case-insensitive about the extension', () => {
+                expect(File.getFileType('NOTES.MD')).toBe('text');
+            });
+        });
+
+        describe('detectFileType', () => {
+            it('should default to txt when no filename is given', () => {
+                const result = File.detectFileType(null);
+
+                expect(result.extension).toBe('txt');
+                expect(result.type).toBe('text');
+                expect(result.wasDefaulted).toBe(true);
+                expect(result.reason).toMatch(/no filename/i);
+            });
+
+            it('should reject a non-string filename the same way', () => {
+                expect(File.detectFileType(12345).wasDefaulted).toBe(true);
+            });
+
+            it('should detect a recognised text extension without defaulting', () => {
+                const result = File.detectFileType('README.md');
+
+                expect(result.extension).toBe('md');
+                expect(result.type).toBe('text');
+                expect(result.wasDefaulted).toBe(false);
+            });
+
+            it('should record the original extension when defaulting', () => {
+                const result = File.detectFileType('mystery.zzzzz');
+
+                expect(result.wasDefaulted).toBe(true);
+                expect(result.originalExtension).toBe('zzzzz');
+                expect(result.defaultedTo).toBeDefined();
+            });
+
+            it('should handle a filename with no extension at all', () => {
+                const result = File.detectFileType('Dockerfile');
+
+                expect(result).toBeDefined();
+                expect(result.type).toBeDefined();
+            });
+
+            it('should lower-case the extension before matching', () => {
+                expect(File.detectFileType('NOTES.MD').extension).toBe('md');
+            });
+        });
+
+        describe('getMimeType', () => {
+            it('should map common text extensions', () => {
+                expect(File.getMimeType('md')).toMatch(/text|markdown/i);
+                expect(File.getMimeType('json')).toMatch(/json/i);
+                expect(File.getMimeType('html')).toMatch(/html/i);
+            });
+
+            it('should return a value for an unknown extension', () => {
+                const mime = File.getMimeType('zzzzz');
+                expect(typeof mime).toBe('string');
+                expect(mime.length).toBeGreaterThan(0);
+            });
+        });
+
+        describe('getSupportedTypes and getBinaryExtensions', () => {
+            it('should expose a text category with extensions', () => {
+                const types = File.getSupportedTypes();
+
+                expect(types.text).toBeDefined();
+                expect(Array.isArray(types.text.extensions)).toBe(true);
+                expect(types.text.extensions).toContain('md');
+            });
+
+            it('should expose a non-empty binary extension list', () => {
+                const exts = File.getBinaryExtensions();
+
+                expect(Array.isArray(exts)).toBe(true);
+                expect(exts.length).toBeGreaterThan(0);
+            });
+
+            it('should not classify any binary extension as text', () => {
+                for (const ext of File.getBinaryExtensions()) {
+                    expect(File.getFileType(`f.${ext}`), `.${ext}`).toBe('binary');
+                }
+            });
+        });
     });
 });
 
