@@ -20,13 +20,14 @@
     "dotenv": "^17.2.2",
     "jsonwebtoken": "^9.0.2",
     "jszip": "^3.10.1",
-    "mongoose": "^8.18.2",
+    "mongoose": "^9.9.1",
     "tough-cookie": "^6.0.0",
     "ws": "^8.18.3",
     "yjs": "^13.6.27"
   },
   "devDependencies": {
-    "@vitest/ui": "^3.2.4",
-    "vitest": "^3.2.4"
+    "@vitest/coverage-v8": "^4.1.10",
+    "@vitest/ui": "^4.1.10",
+    "vitest": "^4.1.10"
   }
 }

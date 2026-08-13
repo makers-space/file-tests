@@ -792,4 +792,326 @@ describe('App Controller and Routes - Comprehensive Tests', () => {
             });
         });
     });
+
+    // =========================================================================
+    // THEME SYSTEM
+    // =========================================================================
+    describe('Theme System', () => {
+        // Minimum valid token set - the schema requires these seven colours
+        const validTokens = () => ({
+            darkMode: false,
+            colors: {
+                primary: '#3F84E5',
+                primaryAccent: '#2A5FA8',
+                secondary: '#E5A03F',
+                secondaryAccent: '#A8742A',
+                background: '#FFFFFF',
+                surface: '#F5F5F5',
+                text: '#111111',
+                textContrast: '#FFFFFF'
+            }
+        });
+
+        const themeBody = (suffix, overrides = {}) => ({
+            name: `Test Theme ${suffix}`,
+            slug: `test-theme-${suffix}`,
+            description: 'Created by the theme test suite',
+            tokens: validTokens(),
+            ...overrides
+        });
+
+        let ownedThemeId;
+        let publicThemeId;
+        let uniq;
+
+        beforeAll(async () => {
+            uniq = Date.now().toString().slice(-6);
+        });
+
+        describe('GET /api/v1/themes/presets', () => {
+            it('should return presets without authentication', async () => {
+                client.clearCookies();
+                const response = await client.get('/api/v1/themes/presets');
+
+                expect(response.status).toBe(200);
+                expect(response.data.success).toBe(true);
+            });
+        });
+
+        describe('POST /api/v1/themes', () => {
+            it('should create a theme for a creator', async () => {
+                await testStartup.loginAsUser('creator');
+                const response = await client.post('/api/v1/themes', themeBody(`a${uniq}`));
+
+                expect(response.status).toBe(201);
+                expect(response.data.success).toBe(true);
+
+                const theme = response.data.theme || response.data.data;
+                expect(theme).toBeDefined();
+                expect(theme.name).toBe(`Test Theme a${uniq}`);
+                ownedThemeId = theme._id || theme.id;
+            });
+
+            it('should default visibility to private', async () => {
+                await testStartup.loginAsUser('creator');
+                const response = await client.post('/api/v1/themes', themeBody(`b${uniq}`));
+
+                expect(response.status).toBe(201);
+                const theme = response.data.theme || response.data.data;
+                expect(theme.visibility).toBe('private');
+            });
+
+            it('should create a public theme when asked', async () => {
+                await testStartup.loginAsUser('creator');
+                const response = await client.post('/api/v1/themes',
+                    themeBody(`pub${uniq}`, {visibility: 'public'}));
+
+                expect(response.status).toBe(201);
+                const theme = response.data.theme || response.data.data;
+                expect(theme.visibility).toBe('public');
+                publicThemeId = theme._id || theme.id;
+            });
+
+            it('should reject a theme with no name', async () => {
+                await testStartup.loginAsUser('creator');
+                const body = themeBody(`c${uniq}`);
+                delete body.name;
+
+                const response = await client.post('/api/v1/themes', body);
+                expect(response.status).toBe(400);
+                expect(response.data.success).toBe(false);
+            });
+
+            it('should reject a slug with invalid characters', async () => {
+                await testStartup.loginAsUser('creator');
+                const response = await client.post('/api/v1/themes',
+                    themeBody(`d${uniq}`, {slug: 'Invalid Slug!'}));
+
+                expect(response.status).toBe(400);
+                expect(response.data.success).toBe(false);
+            });
+
+            it('should reject tokens with a non-hex colour', async () => {
+                await testStartup.loginAsUser('creator');
+                const tokens = validTokens();
+                tokens.colors.primary = 'not-a-colour';
+
+                const response = await client.post('/api/v1/themes',
+                    themeBody(`e${uniq}`, {tokens}));
+
+                expect(response.status).toBe(400);
+                expect(response.data.success).toBe(false);
+            });
+
+            it('should reject a theme missing required colours', async () => {
+                await testStartup.loginAsUser('creator');
+                const tokens = validTokens();
+                delete tokens.colors.background;
+
+                const response = await client.post('/api/v1/themes',
+                    themeBody(`f${uniq}`, {tokens}));
+
+                expect(response.status).toBe(400);
+            });
+
+            it('should deny creation to a user without CREATE_CONTENT', async () => {
+                await testStartup.loginAsUser('user');
+                const response = await client.post('/api/v1/themes', themeBody(`g${uniq}`));
+
+                expect(response.status).toBe(403);
+                expect(response.data.success).toBe(false);
+            });
+
+            it('should require authentication', async () => {
+                client.clearCookies();
+                const response = await client.post('/api/v1/themes', themeBody(`h${uniq}`));
+
+                expect(response.status).toBe(401);
+            });
+        });
+
+        describe('GET /api/v1/themes', () => {
+            it('should list the caller\'s own themes', async () => {
+                await testStartup.loginAsUser('creator');
+                const response = await client.get('/api/v1/themes');
+
+                expect(response.status).toBe(200);
+                expect(response.data.success).toBe(true);
+
+                const themes = response.data.themes || response.data.data;
+                expect(Array.isArray(themes)).toBe(true);
+                const ids = themes.map(t => (t._id || t.id).toString());
+                expect(ids).toContain(ownedThemeId.toString());
+            });
+
+            it('should not list another user\'s private themes', async () => {
+                await testStartup.loginAsUser('superCreator');
+                const response = await client.get('/api/v1/themes');
+
+                expect(response.status).toBe(200);
+                const themes = response.data.themes || response.data.data;
+                const ids = themes.map(t => (t._id || t.id).toString());
+                expect(ids).not.toContain(ownedThemeId.toString());
+            });
+
+            it('should require authentication', async () => {
+                client.clearCookies();
+                const response = await client.get('/api/v1/themes');
+                expect(response.status).toBe(401);
+            });
+        });
+
+        describe('GET /api/v1/themes/public', () => {
+            it('should list public themes without authentication', async () => {
+                client.clearCookies();
+                const response = await client.get('/api/v1/themes/public');
+
+                expect(response.status).toBe(200);
+                expect(response.data.success).toBe(true);
+            });
+
+            it('should include a public theme and exclude a private one', async () => {
+                client.clearCookies();
+                const response = await client.get('/api/v1/themes/public');
+
+                const themes = response.data.themes || response.data.data || [];
+                const ids = themes.map(t => (t._id || t.id).toString());
+                expect(ids).toContain(publicThemeId.toString());
+                expect(ids).not.toContain(ownedThemeId.toString());
+            });
+
+            it('should support a search query', async () => {
+                client.clearCookies();
+                const response = await client.get('/api/v1/themes/public?search=Test');
+                expect(response.status).toBe(200);
+            });
+        });
+
+        describe('GET /api/v1/themes/:id', () => {
+            it('should return a theme to its owner', async () => {
+                await testStartup.loginAsUser('creator');
+                const response = await client.get(`/api/v1/themes/${ownedThemeId}`);
+
+                expect(response.status).toBe(200);
+                const theme = response.data.theme || response.data.data;
+                expect((theme._id || theme.id).toString()).toBe(ownedThemeId.toString());
+            });
+
+            it('should return 404 for a non-existent theme', async () => {
+                await testStartup.loginAsUser('creator');
+                const response = await client.get('/api/v1/themes/000000000000000000000000');
+                expect(response.status).toBe(404);
+            });
+
+            it('should reject a malformed id', async () => {
+                await testStartup.loginAsUser('creator');
+                const response = await client.get('/api/v1/themes/not-an-id');
+                expect([400, 404]).toContain(response.status);
+            });
+        });
+
+        describe('PUT /api/v1/themes/:id', () => {
+            it('should let the owner rename their theme', async () => {
+                await testStartup.loginAsUser('creator');
+                const response = await client.put(`/api/v1/themes/${ownedThemeId}`,
+                    {name: `Renamed ${uniq}`});
+
+                expect(response.status).toBe(200);
+                const theme = response.data.theme || response.data.data;
+                expect(theme.name).toBe(`Renamed ${uniq}`);
+            });
+
+            it('should deny a non-owner without MANAGE_ALL_CONTENT', async () => {
+                await testStartup.loginAsUser('superCreator');
+                const response = await client.put(`/api/v1/themes/${ownedThemeId}`,
+                    {name: 'Hijacked'});
+
+                expect(response.status).toBe(403);
+                expect(response.data.success).toBe(false);
+            });
+
+            it('should allow an admin to update any theme', async () => {
+                await testStartup.loginAsUser('admin');
+                const response = await client.put(`/api/v1/themes/${ownedThemeId}`,
+                    {description: 'Updated by admin'});
+
+                expect(response.status).toBe(200);
+            });
+
+            it('should reject an invalid visibility value', async () => {
+                await testStartup.loginAsUser('creator');
+                const response = await client.put(`/api/v1/themes/${ownedThemeId}`,
+                    {visibility: 'somewhere-else'});
+
+                expect(response.status).toBe(400);
+            });
+        });
+
+        describe('POST /api/v1/themes/:id/fork', () => {
+            it('should fork a public theme and record its origin', async () => {
+                await testStartup.loginAsUser('superCreator');
+                const response = await client.post(`/api/v1/themes/${publicThemeId}/fork`, {});
+
+                expect(response.status).toBe(201);
+                const theme = response.data.theme || response.data.data;
+                expect(theme).toBeDefined();
+                expect((theme.forkedFrom || '').toString()).toBe(publicThemeId.toString());
+            });
+
+            it('should give the fork to the caller, not the original owner', async () => {
+                await testStartup.loginAsUser('superCreator');
+                const response = await client.get('/api/v1/themes');
+
+                const themes = response.data.themes || response.data.data;
+                const forks = themes.filter(t => t.forkedFrom);
+                expect(forks.length).toBeGreaterThan(0);
+            });
+
+            it('should deny forking to a user without CREATE_CONTENT', async () => {
+                await testStartup.loginAsUser('user');
+                const response = await client.post(`/api/v1/themes/${publicThemeId}/fork`, {});
+
+                expect(response.status).toBe(403);
+            });
+
+            it('should return 404 when forking a non-existent theme', async () => {
+                await testStartup.loginAsUser('creator');
+                const response = await client.post('/api/v1/themes/000000000000000000000000/fork', {});
+
+                expect(response.status).toBe(404);
+            });
+        });
+
+        describe('DELETE /api/v1/themes/:id', () => {
+            it('should deny deletion to a non-owner', async () => {
+                await testStartup.loginAsUser('superCreator');
+                const response = await client.delete(`/api/v1/themes/${ownedThemeId}`);
+
+                expect(response.status).toBe(403);
+                expect(response.data.success).toBe(false);
+            });
+
+            it('should let the owner delete their theme', async () => {
+                await testStartup.loginAsUser('creator');
+                const response = await client.delete(`/api/v1/themes/${ownedThemeId}`);
+
+                expect(response.status).toBe(200);
+                expect(response.data.success).toBe(true);
+            });
+
+            it('should return 404 once the theme is gone', async () => {
+                await testStartup.loginAsUser('creator');
+                const response = await client.get(`/api/v1/themes/${ownedThemeId}`);
+
+                expect(response.status).toBe(404);
+            });
+
+            it('should require authentication', async () => {
+                client.clearCookies();
+                const response = await client.delete(`/api/v1/themes/${publicThemeId}`);
+
+                expect(response.status).toBe(401);
+            });
+        });
+    });
 });

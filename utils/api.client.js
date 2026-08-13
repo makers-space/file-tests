@@ -18,6 +18,7 @@ class ApiClient {
         this.cookieJar = new CookieJar();
         this.baseURL = baseURL;
         this.csrfToken = null; // Store CSRF token for state-changing requests
+        this.authenticatedAs = null; // Role this client holds a live session for
         
         this.client = axios.create({
             baseURL,
@@ -32,6 +33,13 @@ class ApiClient {
             if (cookies) {
                 config.headers.Cookie = cookies;
             }
+            // Login, logout, password change and 2FA can invalidate the session
+            const method = config.method?.toLowerCase();
+            if (method && method !== 'get' && /\/auth\/|\/password/.test(config.url || '')) {
+                this.authenticatedAs = null;
+            }
+
+
             
             // Add CSRF token for state-changing requests
             if (['post', 'put', 'patch', 'delete'].includes(config.method?.toLowerCase())) {
@@ -70,6 +78,7 @@ class ApiClient {
     clearCookies() {
         this.cookieJar.removeAllCookiesSync();
         this.csrfToken = null;
+        this.authenticatedAs = null;
         console.log('Cookies and CSRF token cleared from cookie jar');
     }
     
