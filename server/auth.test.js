@@ -6,6 +6,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import mongoose from 'mongoose';
 import jwt from 'jsonwebtoken';
+import speakeasy from 'speakeasy';
 import TestStartup from '../utils/test.startup.js';
 
 describe('Authentication Layer - Comprehensive Tests', () => {
@@ -691,10 +692,120 @@ describe('Authentication Layer - Comprehensive Tests', () => {
             test('should deny backup codes generation without authentication', async () => {
                 client.clearCookies();
                 const response = await client.post('/api/v1/auth/2fa/backup-codes', { password: 'Test123!', token: '123456' });
-                
+
                 expect(response.status).toBe(401);
                 expect(response.data.success).toBe(false);
             });
+        });
+    });
+
+    describe('Full 2FA lifecycle with real TOTP codes', () => {
+        let totpUser;
+        let totpSecret;
+        let backupCodes;
+
+        const currentCode = () => speakeasy.totp({ secret: totpSecret, encoding: 'base32' });
+        const loginAsTotpUser = (extra = {}) =>
+            client.post('/api/v1/auth/login', { ...totpUser.credentials, ...extra });
+
+        beforeAll(async () => {
+            totpUser = await testStartup.createMutableUser({
+                role: 'USER',
+                firstName: 'Totp',
+                lastName: 'Lifecycle',
+                prefix: 'totp'
+            });
+        });
+
+        afterAll(async () => {
+            if (totpUser) {
+                await testStartup.deleteMutableUser(totpUser.id);
+            }
+        });
+
+        test('setup + verify-setup with a real code enables 2FA and returns backup codes', async () => {
+            client.clearCookies();
+            const loginResponse = await loginAsTotpUser();
+            expect(loginResponse.status).toBe(200);
+            expect(loginResponse.data.requiresTwoFactor).toBeUndefined();
+
+            const setupResponse = await client.post('/api/v1/auth/2fa/setup');
+            expect(setupResponse.status).toBe(200);
+            expect(setupResponse.data.qrCode).toMatch(/^data:image\/png;base64,/);
+            expect(setupResponse.data.manualEntryKey).toBeTruthy();
+            totpSecret = setupResponse.data.manualEntryKey;
+
+            const verifyResponse = await client.post('/api/v1/auth/2fa/verify-setup', {
+                token: currentCode()
+            });
+            expect(verifyResponse.status).toBe(200);
+            expect(Array.isArray(verifyResponse.data.backupCodes)).toBe(true);
+            expect(verifyResponse.data.backupCodes.length).toBeGreaterThan(0);
+            backupCodes = verifyResponse.data.backupCodes;
+
+            const statusResponse = await client.get('/api/v1/auth/2fa/status');
+            expect(statusResponse.data.enabled ?? statusResponse.data.twoFactorEnabled).toBe(true);
+        });
+
+        test('login without a code returns requiresTwoFactor and no session', async () => {
+            await client.post('/api/v1/auth/logout');
+            client.clearCookies();
+
+            const response = await loginAsTotpUser();
+            expect(response.status).toBe(200);
+            expect(response.data.requiresTwoFactor).toBe(true);
+
+            const meResponse = await client.get('/api/v1/auth/me');
+            expect(meResponse.status).toBe(401);
+        });
+
+        test('login with a wrong code is rejected', async () => {
+            const response = await loginAsTotpUser({ twoFactorToken: '000000' });
+            expect(response.status).toBe(401);
+        });
+
+        test('login with a valid TOTP code completes and creates a session', async () => {
+            const response = await loginAsTotpUser({ twoFactorToken: currentCode() });
+            expect(response.status).toBe(200);
+            expect(response.data.user).toBeTruthy();
+
+            const meResponse = await client.get('/api/v1/auth/me');
+            expect(meResponse.status).toBe(200);
+        });
+
+        test('backup codes complete login and are single-use', async () => {
+            await client.post('/api/v1/auth/logout');
+            client.clearCookies();
+
+            const code = backupCodes[0];
+            const firstUse = await loginAsTotpUser({ twoFactorToken: code });
+            expect(firstUse.status).toBe(200);
+            expect(firstUse.data.user).toBeTruthy();
+
+            await client.post('/api/v1/auth/logout');
+            client.clearCookies();
+
+            const secondUse = await loginAsTotpUser({ twoFactorToken: code });
+            expect(secondUse.status).toBe(401);
+        });
+
+        test('disable with password + code turns 2FA off; login no longer challenges', async () => {
+            const loginResponse = await loginAsTotpUser({ twoFactorToken: currentCode() });
+            expect(loginResponse.status).toBe(200);
+
+            const disableResponse = await client.post('/api/v1/auth/2fa/disable', {
+                password: totpUser.credentials.password,
+                token: currentCode()
+            });
+            expect(disableResponse.status).toBe(200);
+
+            await client.post('/api/v1/auth/logout');
+            client.clearCookies();
+
+            const plainLogin = await loginAsTotpUser();
+            expect(plainLogin.status).toBe(200);
+            expect(plainLogin.data.requiresTwoFactor).toBeUndefined();
+            expect(plainLogin.data.user).toBeTruthy();
         });
     });
 
