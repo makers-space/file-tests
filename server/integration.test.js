@@ -546,6 +546,184 @@ describe('External Integrations - HTTP API', () => {
     });
 
     // =========================================================================
+    // Inbound file pull: external apps fetch granted files with an API key
+    // =========================================================================
+    describe('Inbound file pull (external API key)', () => {
+        let inbound;          // integration used for pull tests
+        let inboundSecret;    // its signing secret (response signatures)
+        let inboundKey;       // the pull API key
+
+        const externalFetch = (path, {key = inboundKey, content = false} = {}) =>
+            fetch(
+                `http://localhost:${testStartup.port}/api/v1/integrations/external/files?path=${encodeURIComponent(path)}&content=${content}`,
+                {headers: key ? {'X-FSOne-Key': key} : {}}
+            );
+
+        const responseSignatureValid = async (response, bodyText, secret) => verifySignature(secret, {
+            headers: {
+                'x-fsone-timestamp': response.headers.get('x-fsone-timestamp'),
+                'x-fsone-signature': response.headers.get('x-fsone-signature')
+            },
+            raw: bodyText
+        });
+
+        beforeAll(async () => {
+            await testStartup.loginAsUser('creator');
+            const createResponse = await client.post('/api/v1/integrations', {
+                name: 'Pull Consumer',
+                baseUrl: `${RECEIVER_URL}?pull=1`,
+                scope: 'user'
+            });
+            expect(createResponse.status).toBe(201);
+            inbound = createResponse.data.integration;
+            inboundSecret = createResponse.data.signingSecret;
+
+            const verifyResponse = await client.post(`/api/v1/integrations/${inbound.id}/verify`);
+            expect(verifyResponse.status).toBe(200);
+        }, 60000);
+
+        test('owner issues an inbound key; it is revealed once and never in payloads', async () => {
+            const response = await client.post(`/api/v1/integrations/${inbound.id}/inbound-key`);
+            expect(response.status).toBe(200);
+            expect(response.data.inboundKey).toMatch(/^fso_[a-f0-9]{48}$/);
+            expect(response.data.integration.inboundKeyHash).toBeUndefined();
+            expect(response.data.integration.inboundKeyIssuedAt).toBeTruthy();
+            inboundKey = response.data.inboundKey;
+
+            const getResponse = await client.get(`/api/v1/integrations/${inbound.id}`);
+            expect(getResponse.status).toBe(200);
+            expect(getResponse.data.integration.inboundKeyHash).toBeUndefined();
+        });
+
+        test('non-owner cannot issue keys or set grants', async () => {
+            await testStartup.loginAsUser('user');
+            const keyResponse = await client.post(`/api/v1/integrations/${inbound.id}/inbound-key`);
+            expect(keyResponse.status).toBe(403);
+            const grantResponse = await client.put(`/api/v1/integrations/${inbound.id}/grants`, {
+                grants: [{path: '/'}]
+            });
+            expect(grantResponse.status).toBe(403);
+        });
+
+        test('pull without any grants is denied', async () => {
+            const response = await externalFetch(sampleFilePath);
+            expect(response.status).toBe(403);
+        });
+
+        test('missing or unknown keys are rejected', async () => {
+            const missing = await externalFetch(sampleFilePath, {key: null});
+            expect(missing.status).toBe(401);
+
+            const unknown = await externalFetch(sampleFilePath, {key: `fso_${'0'.repeat(48)}`});
+            expect(unknown.status).toBe(401);
+        });
+
+        test('granting the test root allows metadata pulls with a signed response', async () => {
+            await testStartup.loginAsUser('creator');
+            const grantResponse = await client.put(`/api/v1/integrations/${inbound.id}/grants`, {
+                grants: [{path: testRoot}]
+            });
+            expect(grantResponse.status).toBe(200);
+            expect(grantResponse.data.integration.grants).toEqual([
+                {path: testRoot, access: 'read'}
+            ]);
+
+            const response = await externalFetch(sampleFilePath);
+            expect(response.status).toBe(200);
+            const bodyText = await response.text();
+            const body = JSON.parse(bodyText);
+            expect(body.file.filePath).toBe(sampleFilePath);
+            expect(body.file.content).toBeUndefined();
+            expect(await responseSignatureValid(response, bodyText, inboundSecret)).toBe(true);
+        });
+
+        test('content pulls return checksummed content', async () => {
+            const response = await externalFetch(sampleFilePath, {content: true});
+            expect(response.status).toBe(200);
+            const bodyText = await response.text();
+            const body = JSON.parse(bodyText);
+            expect(body.file.content).toBe(sampleContent);
+            expect(body.file.contentEncoding).toBe('utf-8');
+            expect(body.file.checksum).toBe(sha256(sampleContent));
+            expect(await responseSignatureValid(response, bodyText, inboundSecret)).toBe(true);
+        });
+
+        test('folder grants are recursive — nested files and subfolders are covered', async () => {
+            await testStartup.loginAsUser('creator');
+            const midDir = await client.post('/api/v1/files/directory', {dirPath: `${testRoot}/nested`});
+            expect(midDir.status).toBe(201);
+            const deepDir = await client.post('/api/v1/files/directory', {dirPath: `${testRoot}/nested/deeper`});
+            expect(deepDir.status).toBe(201);
+            const nestedPath = `${testRoot}/nested/deeper/deep-file.txt`;
+            const nestedContent = 'buried but still granted';
+            const createFile = await client.post('/api/v1/files', {filePath: nestedPath, content: nestedContent});
+            expect(createFile.status).toBe(201);
+
+            // Grant covers testRoot — the nested file is two levels deeper
+            const response = await externalFetch(nestedPath, {content: true});
+            expect(response.status).toBe(200);
+            const body = JSON.parse(await response.text());
+            expect(body.file.filePath).toBe(nestedPath);
+            expect(body.file.content).toBe(nestedContent);
+
+            // Prefix matching is segment-aware: a sibling whose name merely
+            // starts with the granted string is NOT covered
+            const lookalike = await externalFetch(`${testRoot}-lookalike/file.txt`);
+            expect(lookalike.status).toBe(403);
+        });
+
+        test('paths outside the grant are refused and counted', async () => {
+            const outside = await externalFetch(`/${testStartup.creator.username}/not-granted.txt`);
+            expect(outside.status).toBe(403);
+
+            const getResponse = await client.get(`/api/v1/integrations/${inbound.id}`);
+            expect(getResponse.data.integration.inboundStats.totalRequests).toBeGreaterThan(0);
+            expect(getResponse.data.integration.inboundStats.deniedRequests).toBeGreaterThan(0);
+        });
+
+        test('grants cannot open files the owner cannot read', async () => {
+            // Grant a path inside another user's private space — the grant alone
+            // must not be enough, the owner's own permissions still apply
+            await client.put(`/api/v1/integrations/${inbound.id}/grants`, {
+                grants: [{path: `/${testStartup.admin.username}`}]
+            });
+            const response = await externalFetch(`/${testStartup.admin.username}/private.txt`);
+            expect(response.status).toBe(404);
+
+            // restore the working grant for later tests
+            await client.put(`/api/v1/integrations/${inbound.id}/grants`, {
+                grants: [{path: testRoot}]
+            });
+        });
+
+        test('rotating the inbound key invalidates the old one', async () => {
+            const rotateResponse = await client.post(`/api/v1/integrations/${inbound.id}/inbound-key`);
+            expect(rotateResponse.status).toBe(200);
+            const newKey = rotateResponse.data.inboundKey;
+            expect(newKey).not.toBe(inboundKey);
+
+            const oldKeyResponse = await externalFetch(sampleFilePath, {key: inboundKey});
+            expect(oldKeyResponse.status).toBe(401);
+
+            inboundKey = newKey;
+            const newKeyResponse = await externalFetch(sampleFilePath);
+            expect(newKeyResponse.status).toBe(200);
+        });
+
+        test('disabling the integration shuts off inbound access', async () => {
+            const disableResponse = await client.patch(`/api/v1/integrations/${inbound.id}`, {
+                status: 'disabled'
+            });
+            expect(disableResponse.status).toBe(200);
+
+            const response = await externalFetch(sampleFilePath);
+            expect(response.status).toBe(403);
+
+            await client.delete(`/api/v1/integrations/${inbound.id}`);
+        });
+    });
+
+    // =========================================================================
     // Lifecycle: URL changes, rotation, disable, delete
     // =========================================================================
     describe('Integration lifecycle', () => {
