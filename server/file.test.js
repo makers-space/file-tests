@@ -1028,6 +1028,289 @@ describe('File Routes - HTTP API', () => {
 
     });
 
+    describe('Name collisions', () => {
+        let dir;
+        let otherDir;
+
+        const contentOf = async (filePath) => {
+            const response = await client.get(`/api/v1/files/${encodePath(filePath)}/content`);
+            return { status: response.status, content: response.data?.content };
+        };
+        const exists = async (filePath) => {
+            const response = await client.get(`/api/v1/files/${encodePath(filePath)}/metadata`);
+            return response.status === 200;
+        };
+        const expectConflict = (response, suggestedName, canReplace = true) => {
+            expect(response.status).toBe(409);
+            expect(response.data.code).toBe('NAME_CONFLICT');
+            expect(response.data.message).toMatch(/already exists/i);
+            expect(response.data.conflict.suggestedName).toBe(suggestedName);
+            expect(response.data.conflict.canReplace).toBe(canReplace);
+        };
+
+        beforeAll(async () => {
+            await testStartup.loginAsUser('creator');
+            dir = `${testRoot}/collisions`;
+            otherDir = `${dir}/other`;
+            for (const dirPath of [dir, otherDir]) {
+                const response = await client.post('/api/v1/files/directory', { dirPath, description: 'Collision tests' });
+                expect(response.status).toBe(201);
+            }
+            await createFile(`${dir}/report.txt`, 'original report');
+            await createFile(`${otherDir}/report.txt`, 'other report');
+        });
+
+        describe('create file', () => {
+            test('is refused by default and describes the conflict', async () => {
+                const response = await client.post('/api/v1/files', { filePath: `${dir}/report.txt`, content: 'clobber' });
+                expectConflict(response, 'report (1).txt');
+                expect((await contentOf(`${dir}/report.txt`)).content).toBe('original report');
+            });
+
+            test('onConflict=rename keeps both', async () => {
+                const response = await client.post('/api/v1/files', {
+                    filePath: `${dir}/report.txt`, content: 'second report', onConflict: 'rename'
+                });
+                expect(response.status).toBe(201);
+                expect(response.data.file.filePath).toBe(`${dir}/report (1).txt`);
+                expect((await contentOf(`${dir}/report.txt`)).content).toBe('original report');
+                expect((await contentOf(`${dir}/report (1).txt`)).content).toBe('second report');
+            });
+
+            test('onConflict=replace overwrites the existing file', async () => {
+                await createFile(`${dir}/draft.txt`, 'old draft');
+                const response = await client.post('/api/v1/files', {
+                    filePath: `${dir}/draft.txt`, content: 'new draft', onConflict: 'replace'
+                });
+                expect(response.status).toBe(201);
+                expect(response.data.file.filePath).toBe(`${dir}/draft.txt`);
+
+                const replaced = await waitForResponse(
+                    () => client.get(`/api/v1/files/${encodePath(`${dir}/draft.txt`)}/content`),
+                    (r) => r.data?.content === 'new draft'
+                );
+                expect(replaced.data.content).toBe('new draft');
+            });
+        });
+
+        describe('create directory', () => {
+            test('is refused by default and a folder cannot be replaced', async () => {
+                const response = await client.post('/api/v1/files/directory', { dirPath: otherDir });
+                expectConflict(response, 'other (1)', false);
+
+                const replace = await client.post('/api/v1/files/directory', { dirPath: otherDir, onConflict: 'replace' });
+                expect(replace.status).toBe(400);
+                expect(await exists(`${otherDir}/report.txt`)).toBe(true);
+            });
+
+            test('onConflict=rename keeps both and the new folder is usable', async () => {
+                const response = await client.post('/api/v1/files/directory', { dirPath: otherDir, onConflict: 'rename' });
+                expect(response.status).toBe(201);
+                expect(response.data.directory.filePath).toBe(`${dir}/other (1)`);
+
+                const nested = await client.post('/api/v1/files/directory', { dirPath: `${dir}/other (1)/inner` });
+                expect(nested.status).toBe(201);
+            });
+        });
+
+        describe('copy', () => {
+            test('is refused by default; copying onto itself cannot replace', async () => {
+                const response = await client.post('/api/v1/files/copy', {
+                    sourcePath: `${dir}/report.txt`,
+                    destinationPath: `${dir}/report.txt`
+                });
+                expectConflict(response, 'report (2).txt', false);
+
+                const replace = await client.post('/api/v1/files/copy', {
+                    sourcePath: `${dir}/report.txt`,
+                    destinationPath: `${dir}/report.txt`,
+                    onConflict: 'replace'
+                });
+                expect(replace.status).toBe(400);
+                expect((await contentOf(`${dir}/report.txt`)).content).toBe('original report');
+            });
+
+            test('onConflict=rename keeps both with the next free number', async () => {
+                const response = await client.post('/api/v1/files/copy', {
+                    sourcePath: `${dir}/report.txt`,
+                    destinationPath: `${dir}/report.txt`,
+                    onConflict: 'rename'
+                });
+                expect(response.status).toBe(201);
+                expect(response.data.newPath).toBe(`${dir}/report (2).txt`);
+                expect(response.data.renamed).toBe(true);
+                expect((await contentOf(`${dir}/report (2).txt`)).content).toBe('original report');
+            });
+
+            test('onConflict=replace overwrites the destination', async () => {
+                const response = await client.post('/api/v1/files/copy', {
+                    sourcePath: `${dir}/report.txt`,
+                    destinationPath: `${otherDir}/report.txt`,
+                    onConflict: 'replace'
+                });
+                expect(response.status).toBe(201);
+                expect(response.data.newPath).toBe(`${otherDir}/report.txt`);
+                expect(response.data.renamed).toBe(false);
+
+                const replaced = await waitForResponse(
+                    () => client.get(`/api/v1/files/${encodePath(`${otherDir}/report.txt`)}/content`),
+                    (r) => r.data?.content === 'original report'
+                );
+                expect(replaced.data.content).toBe('original report');
+                expect((await contentOf(`${dir}/report.txt`)).content).toBe('original report');
+            });
+
+            test('a free name is not renamed', async () => {
+                const response = await client.post('/api/v1/files/copy', {
+                    sourcePath: `${dir}/report.txt`,
+                    destinationPath: `${dir}/report-copy.txt`
+                });
+                expect(response.status).toBe(201);
+                expect(response.data.newPath).toBe(`${dir}/report-copy.txt`);
+                expect(response.data.renamed).toBe(false);
+            });
+        });
+
+        describe('move', () => {
+            beforeAll(async () => {
+                await createFile(`${dir}/memo.txt`, 'top memo');
+                await createFile(`${otherDir}/memo.txt`, 'nested memo');
+            });
+
+            test('is refused by default and changes nothing', async () => {
+                const response = await client.post('/api/v1/files/move', {
+                    sourcePath: `${dir}/memo.txt`,
+                    destinationPath: `${otherDir}/memo.txt`
+                });
+                expectConflict(response, 'memo (1).txt');
+                expect((await contentOf(`${dir}/memo.txt`)).content).toBe('top memo');
+                expect((await contentOf(`${otherDir}/memo.txt`)).content).toBe('nested memo');
+            });
+
+            test('to where it already is, or a folder into itself, is refused', async () => {
+                const same = await client.post('/api/v1/files/move', {
+                    sourcePath: `${dir}/memo.txt`,
+                    destinationPath: `${dir}/memo.txt`
+                });
+                expect(same.status).toBe(409);
+
+                const nested = await client.post('/api/v1/files/move', {
+                    sourcePath: otherDir,
+                    destinationPath: `${otherDir}/nested/other`
+                });
+                expect(nested.status).toBe(400);
+                expect(await exists(`${otherDir}/memo.txt`)).toBe(true);
+            });
+
+            test('onConflict=replace overwrites the destination', async () => {
+                const response = await client.post('/api/v1/files/move', {
+                    sourcePath: `${dir}/memo.txt`,
+                    destinationPath: `${otherDir}/memo.txt`,
+                    onConflict: 'replace'
+                });
+                expect(response.status).toBe(200);
+                expect(response.data.newPath).toBe(`${otherDir}/memo.txt`);
+                expect(response.data.renamed).toBe(false);
+
+                const replaced = await waitForResponse(
+                    () => client.get(`/api/v1/files/${encodePath(`${otherDir}/memo.txt`)}/content`),
+                    (r) => r.data?.content === 'top memo'
+                );
+                expect(replaced.data.content).toBe('top memo');
+                expect(await exists(`${dir}/memo.txt`)).toBe(false);
+            });
+        });
+
+        describe('rename', () => {
+            beforeAll(async () => {
+                await createFile(`${dir}/alpha.txt`, 'alpha');
+                await createFile(`${dir}/beta.txt`, 'beta');
+                await createFile(`${dir}/gamma.txt`, 'gamma');
+            });
+
+            test('is refused by default', async () => {
+                const response = await client.post(`/api/v1/files/${encodePath(`${dir}/alpha.txt`)}/rename`, { newName: 'beta.txt' });
+                expectConflict(response, 'beta (1).txt');
+                expect((await contentOf(`${dir}/alpha.txt`)).content).toBe('alpha');
+            });
+
+            test('onConflict=rename keeps both', async () => {
+                const response = await client.post(`/api/v1/files/${encodePath(`${dir}/alpha.txt`)}/rename`, {
+                    newName: 'beta.txt', onConflict: 'rename'
+                });
+                expect(response.status).toBe(200);
+                expect((await contentOf(`${dir}/beta (1).txt`)).content).toBe('alpha');
+                expect((await contentOf(`${dir}/beta.txt`)).content).toBe('beta');
+                expect(await exists(`${dir}/alpha.txt`)).toBe(false);
+            });
+
+            test('onConflict=replace overwrites the existing file', async () => {
+                const response = await client.post(`/api/v1/files/${encodePath(`${dir}/gamma.txt`)}/rename`, {
+                    newName: 'beta.txt', onConflict: 'replace'
+                });
+                expect(response.status).toBe(200);
+
+                const replaced = await waitForResponse(
+                    () => client.get(`/api/v1/files/${encodePath(`${dir}/beta.txt`)}/content`),
+                    (r) => r.data?.content === 'gamma'
+                );
+                expect(replaced.data.content).toBe('gamma');
+                expect(await exists(`${dir}/gamma.txt`)).toBe(false);
+            });
+        });
+
+        describe('upload', () => {
+            const upload = (content, onConflict) => {
+                const form = new FormData();
+                form.append('files', Buffer.from(content), { filename: 'upload.txt', contentType: 'text/plain' });
+                form.append('basePath', dir);
+                if (onConflict) form.append('onConflict', onConflict);
+                return client.post('/api/v1/files/upload', form, { headers: form.getHeaders() });
+            };
+
+            beforeAll(async () => {
+                await createFile(`${dir}/upload.txt`, 'first upload');
+            });
+
+            test('skips an existing name by default and reports the conflict', async () => {
+                const response = await upload('ignored');
+                expect(response.status).toBe(201);
+                expect(response.data.files).toHaveLength(0);
+                expect(response.data.conflicts).toEqual([{
+                    fileName: 'upload.txt',
+                    filePath: `${dir}/upload.txt`,
+                    suggestedName: 'upload (1).txt',
+                    canReplace: true
+                }]);
+                expect((await contentOf(`${dir}/upload.txt`)).content).toBe('first upload');
+            });
+
+            test('onConflict=rename keeps both', async () => {
+                const response = await upload('second upload', 'rename');
+                expect(response.status).toBe(201);
+                expect(response.data.conflicts).toBeUndefined();
+                expect(response.data.files[0].filePath).toBe(`${dir}/upload (1).txt`);
+                expect(response.data.renamed).toEqual([
+                    { fileName: 'upload.txt', savedAs: 'upload (1).txt', filePath: `${dir}/upload (1).txt` }
+                ]);
+                expect((await contentOf(`${dir}/upload.txt`)).content).toBe('first upload');
+                expect((await contentOf(`${dir}/upload (1).txt`)).content).toBe('second upload');
+            });
+
+            test('onConflict=replace overwrites the existing file', async () => {
+                const response = await upload('third upload', 'replace');
+                expect(response.status).toBe(201);
+                expect(response.data.files[0].filePath).toBe(`${dir}/upload.txt`);
+
+                const replaced = await waitForResponse(
+                    () => client.get(`/api/v1/files/${encodePath(`${dir}/upload.txt`)}/content`),
+                    (r) => r.data?.content === 'third upload'
+                );
+                expect(replaced.data.content).toBe('third upload');
+            });
+        });
+    });
+
     describe('Rename edge cases', () => {
         let renameEdgeDir;
         let renameSourcePath;
@@ -4392,6 +4675,163 @@ describe('File Routes - HTTP API', () => {
 
             expect(result.outcome).toBe('established');
             expect(result.data.userId).toBe(testStartup.user.id);
+        });
+    });
+
+    describe('File event notifications', () => {
+        const WebSocket = require('ws');
+        const jwt = require('jsonwebtoken');
+        let ws;
+        let events;
+        let dir;
+
+        const eventsOfType = (type) => events.filter(e => e.type === type);
+        const waitForEvent = async (type, predicate = () => true) => {
+            const deadline = Date.now() + 5000;
+            while (Date.now() < deadline) {
+                const match = eventsOfType(type).find(e => predicate(e.data));
+                if (match) return match;
+                await new Promise(resolve => setTimeout(resolve, 50));
+            }
+            return undefined;
+        };
+        const settle = () => new Promise(resolve => setTimeout(resolve, 400));
+
+        beforeAll(async () => {
+            await testStartup.loginAsUser('creator');
+            dir = `${testRoot}/notify`;
+            const response = await client.post('/api/v1/files/directory', { dirPath: dir, description: 'Notification tests' });
+            expect(response.status).toBe(201);
+
+            const token = jwt.sign(
+                {id: testStartup.creator.id, username: testStartup.creator.username},
+                process.env.ACCESS_TOKEN_SECRET,
+                {expiresIn: '5m'}
+            );
+            events = [];
+            ws = new WebSocket(`ws://localhost:${testStartup.port}/notifications?token=${token}`);
+            ws.on('message', (raw) => {
+                try { events.push(JSON.parse(raw.toString())); } catch { /* ignore non-JSON */ }
+            });
+            await new Promise((resolve, reject) => {
+                const timer = setTimeout(() => reject(new Error('notification socket timeout')), 6000);
+                const poll = setInterval(() => {
+                    if (events.some(e => e.type === 'connection:established')) {
+                        clearInterval(poll);
+                        clearTimeout(timer);
+                        resolve();
+                    }
+                }, 25);
+            });
+        });
+
+        afterAll(() => {
+            try { ws?.close(); } catch { /* already closed */ }
+        });
+
+        beforeEach(() => { events.length = 0; });
+
+        test('creating a file sends the actor exactly one event', async () => {
+            await createFile(`${dir}/a.txt`, 'a');
+            const event = await waitForEvent('file:created');
+            await settle();
+
+            expect(event).toBeDefined();
+            expect(event.data.filePath).toBe(`${dir}/a.txt`);
+            expect(event.data.actor).toBe(testStartup.creator.username);
+            expect(eventsOfType('file:created')).toHaveLength(1);
+        });
+
+        test('creating a directory sends one directory event', async () => {
+            const response = await client.post('/api/v1/files/directory', { dirPath: `${dir}/sub`, description: 'sub' });
+            expect(response.status).toBe(201);
+            const event = await waitForEvent('directory:created');
+            await settle();
+
+            expect(event.data.filePath).toBe(`${dir}/sub`);
+            expect(eventsOfType('directory:created')).toHaveLength(1);
+        });
+
+        test('uploading several files sends a single event', async () => {
+            const form = new FormData();
+            form.append('files', Buffer.from('one'), { filename: 'one.txt', contentType: 'text/plain' });
+            form.append('files', Buffer.from('two'), { filename: 'two.txt', contentType: 'text/plain' });
+            form.append('basePath', dir);
+            const response = await client.post('/api/v1/files/upload', form, { headers: form.getHeaders() });
+            expect(response.status).toBe(201);
+
+            const event = await waitForEvent('file:uploaded');
+            await settle();
+
+            expect(event.data.count).toBe(2);
+            expect(eventsOfType('file:uploaded')).toHaveLength(1);
+        });
+
+        test('rename, copy, move and delete each send one event', async () => {
+            const rename = await client.post(`/api/v1/files/${encodePath(`${dir}/a.txt`)}/rename`, { newName: 'b.txt' });
+            expect(rename.status).toBe(200);
+            expect(await waitForEvent('file:renamed')).toBeDefined();
+
+            const copy = await client.post('/api/v1/files/copy', { sourcePath: `${dir}/b.txt`, destinationPath: `${dir}/b.txt`, onConflict: 'rename' });
+            expect(copy.status).toBe(201);
+            const copied = await waitForEvent('file:created', d => d.operation === 'copy');
+            expect(copied.data.renamed).toBe(true);
+            expect(copied.data.fileName).toBe('b (1).txt');
+
+            const move = await client.post('/api/v1/files/move', { sourcePath: `${dir}/b.txt`, destinationPath: `${dir}/sub/b.txt` });
+            expect(move.status).toBe(200);
+            expect(await waitForEvent('file:moved')).toBeDefined();
+
+            const del = await client.delete(`/api/v1/files/${encodePath(`${dir}/sub/b.txt`)}`);
+            expect(del.status).toBe(200);
+            expect(await waitForEvent('file:deleted')).toBeDefined();
+            await settle();
+
+            for (const type of ['file:renamed', 'file:moved', 'file:deleted']) {
+                expect(eventsOfType(type)).toHaveLength(1);
+            }
+            expect(eventsOfType('file:created')).toHaveLength(1);
+        });
+
+        test('a refused move sends no event and describes the conflict', async () => {
+            await createFile(`${dir}/clash.txt`, 'top');
+            await createFile(`${dir}/sub/clash.txt`, 'nested');
+            await settle();
+            events.length = 0;
+
+            const response = await client.post('/api/v1/files/move', {
+                sourcePath: `${dir}/clash.txt`,
+                destinationPath: `${dir}/sub/clash.txt`
+            });
+            await settle();
+
+            expect(response.status).toBe(409);
+            expect(response.data.code).toBe('NAME_CONFLICT');
+            expect(response.data.conflict.suggestedPath).toBe(`${dir}/sub/clash (1).txt`);
+            expect(response.data.conflict.suggestedName).toBe('clash (1).txt');
+            expect(eventsOfType('file:moved')).toHaveLength(0);
+        });
+
+        test('moving with onConflict=rename keeps both files', async () => {
+            const response = await client.post('/api/v1/files/move', {
+                sourcePath: `${dir}/clash.txt`,
+                destinationPath: `${dir}/sub/clash.txt`,
+                onConflict: 'rename'
+            });
+            expect(response.status).toBe(200);
+            expect(response.data.newPath).toBe(`${dir}/sub/clash (1).txt`);
+            expect(response.data.renamed).toBe(true);
+
+            const event = await waitForEvent('file:moved');
+            expect(event.data.renamed).toBe(true);
+            expect(event.data.fileName).toBe('clash (1).txt');
+
+            const moved = await client.get(`/api/v1/files/${encodePath(`${dir}/sub/clash (1).txt`)}/content`);
+            expect(moved.data.content).toBe('top');
+            const kept = await client.get(`/api/v1/files/${encodePath(`${dir}/sub/clash.txt`)}/content`);
+            expect(kept.data.content).toBe('nested');
+            const gone = await client.get(`/api/v1/files/${encodePath(`${dir}/clash.txt`)}/metadata`);
+            expect([400, 404]).toContain(gone.status);
         });
     });
 
