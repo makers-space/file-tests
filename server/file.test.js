@@ -8,6 +8,7 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 import FormData from 'form-data';
 import mongoose from 'mongoose';
 import JSZip from 'jszip';
+import * as Y from 'yjs';
 import TestStartup from '../utils/test.startup.js';
 
 const encodePath = (filePath) => encodeURIComponent(filePath);
@@ -950,6 +951,62 @@ describe('File Routes - HTTP API', () => {
             console.log('✅ Yjs document metadata correctly updated during file copy');
             console.log('✅ Server logs show different docNames for source and copied paths');
             console.log('✅ Content preservation and independent path accessibility confirm metadata updates work');
+        });
+
+        test('persists an update sent over the Yjs WebSocket', async () => {
+            const WebSocket = require('ws');
+            const filePath = `${yjsTestDir}/ws-update-roundtrip.txt`;
+            const marker = `ws-edit-${Date.now()}`;
+            await createFile(filePath, 'seed', 'Yjs WebSocket update round trip');
+
+            const clientDoc = new Y.Doc();
+            clientDoc.getText('content').insert(0, marker);
+            const update = Y.encodeStateAsUpdate(clientDoc);
+
+            // y-protocols frame: messageSync (0), syncStep2 (1), var-length update
+            const header = [0, 1];
+            let length = update.length;
+            while (length > 0x7f) {
+                header.push(0x80 | (length & 0x7f));
+                length >>>= 7;
+            }
+            header.push(length);
+            const frame = Uint8Array.from([...header, ...update]);
+
+            await new Promise((resolve, reject) => {
+                const ws = new WebSocket(`ws://localhost:${testStartup.port}/yjs${encodeURI(filePath)}`, {
+                    headers: { Cookie: client.getCookiesForWebSocket() }
+                });
+                const timeout = setTimeout(() => {
+                    ws.close();
+                    reject(new Error('Yjs WebSocket connection timeout'));
+                }, 5000);
+                // The server attaches its handlers after async auth, so wait for
+                // its first sync message before sending.
+                ws.once('message', () => {
+                    clearTimeout(timeout);
+                    ws.send(frame);
+                    setTimeout(() => {
+                        ws.close();
+                        resolve();
+                    }, 500);
+                });
+                ws.on('unexpected-response', (req, res) => {
+                    clearTimeout(timeout);
+                    reject(new Error(`Yjs WebSocket rejected with HTTP ${res.statusCode}`));
+                });
+                ws.on('error', (error) => {
+                    clearTimeout(timeout);
+                    reject(new Error(`Yjs WebSocket connection failed: ${error.message}`));
+                });
+            });
+
+            const contentResponse = await waitForResponse(
+                () => client.get(`/api/v1/files/${encodePath(filePath)}/content`),
+                (response) => String(response.data?.content ?? '').includes(marker)
+            );
+            expect(contentResponse.status).toBe(200);
+            expect(contentResponse.data.content).toContain(marker);
         });
 
         test('health endpoint includes Redis adapter information', async () => {
