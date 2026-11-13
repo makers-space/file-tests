@@ -1114,4 +1114,45 @@ describe('App Controller and Routes - Comprehensive Tests', () => {
             });
         });
     });
+    describe('Kept notifications', () => {
+        test('a file shared with someone is waiting in their notifications, and they can read and delete it', async () => {
+            await testStartup.loginAsUser('user');
+            await client.delete('/api/v1/notifications');
+
+            await testStartup.loginAsUser('creator');
+            await client.post(`/api/v1/users/${testStartup.user.id}/connect`);
+            await testStartup.loginAsUser('user');
+            await client.put(`/api/v1/users/${testStartup.creator.id}/connect`, { action: 'accept' });
+            await testStartup.loginAsUser('creator');
+            const filePath = `/${testStartup.creator.username}/kept-notice-${Date.now()}.txt`;
+            const created = await client.post('/api/v1/files', { filePath, description: 'Kept notification test' });
+            expect(created.status).toBe(201);
+            const shared = await client.post(`/api/v1/files/${encodeURIComponent(filePath)}/share`, { userIds: [testStartup.user.id], permission: 'read' });
+            expect(shared.status).toBe(200);
+            expect((await client.get('/api/v1/notifications')).data.notifications.some((entry) => entry.type === 'file:shared')).toBe(false);
+
+            await testStartup.loginAsUser('user');
+            let list = null;
+            for (let attempt = 0; attempt < 100; attempt++) {
+                list = (await client.get('/api/v1/notifications')).data;
+                if (list.notifications.some((entry) => entry.type === 'file:shared')) break;
+                await new Promise((resolve) => setTimeout(resolve, 30));
+            }
+            const kept = list.notifications.find((entry) => entry.type === 'file:shared');
+            expect(kept).toMatchObject({ level: 'info', read: false });
+            expect(kept.message).toMatch(/shared "kept-notice-/);
+            expect(list.unread).toBeGreaterThanOrEqual(1);
+
+            expect((await client.post('/api/v1/notifications/read', { id: 'nope' })).status).toBe(400);
+            expect((await client.post('/api/v1/notifications/read', { id: kept.id })).data.unread).toBe(list.unread - 1);
+            expect((await client.delete(`/api/v1/notifications?id=${kept.id}`)).data.removed).toBe(1);
+            expect((await client.get('/api/v1/notifications')).data.notifications.some((entry) => entry.id === kept.id)).toBe(false);
+            expect((await client.post('/api/v1/notifications/read')).data.unread).toBe(0);
+            await client.delete('/api/v1/notifications');
+            expect((await client.get('/api/v1/notifications')).data.notifications).toEqual([]);
+
+            client.clearCookies();
+            expect((await client.get('/api/v1/notifications')).status).toBe(401);
+        });
+    });
 });
