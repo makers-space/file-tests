@@ -1592,4 +1592,58 @@ describe('Authentication Layer - Comprehensive Tests', () => {
             });
         });
     });
+
+    describe('Admin-only environment', () => {
+        const limited = 'This environment is limited to administrators';
+
+        afterAll(() => {
+            delete process.env.ADMIN_ONLY;
+        });
+
+        test('a signed-in non-admin is refused and an admin is let in', async () => {
+            client.clearCookies();
+            client.authenticatedAs = null;
+            await testStartup.loginAsUser('user');
+            expect((await client.get('/api/v1/auth/me')).status).toBe(200);
+
+            process.env.ADMIN_ONLY = 'true';
+            const refused = await client.get('/api/v1/auth/me');
+            expect(refused.status).toBe(403);
+            expect(refused.data.message).toBe(limited);
+
+            client.clearCookies();
+            client.authenticatedAs = null;
+            const login = await client.post('/api/v1/auth/login', testStartup.user.credentials);
+            expect(login.status).toBe(403);
+            expect(login.data.message).toBe(limited);
+
+            await testStartup.loginAsUser('admin');
+            expect((await client.get('/api/v1/auth/me')).status).toBe(200);
+            client.clearCookies();
+            client.authenticatedAs = null;
+            await testStartup.loginAsUser('owner');
+            expect((await client.get('/api/v1/auth/me')).status).toBe(200);
+        });
+
+        test('sign-up is refused while it is on', async () => {
+            process.env.ADMIN_ONLY = 'true';
+            client.clearCookies();
+            client.authenticatedAs = null;
+            const stamp = Date.now();
+            const response = await client.post('/api/v1/auth/signup', {
+                firstName: 'Stage', lastName: 'Visitor', username: 'stage_' + stamp,
+                email: `stage.${stamp}@example.com`, password: 'SecurePass123!'
+            });
+            expect(response.status).toBe(403);
+            expect(response.data.message).toBe(limited);
+        });
+
+        test('nothing changes when it is off', async () => {
+            process.env.ADMIN_ONLY = 'false';
+            client.clearCookies();
+            client.authenticatedAs = null;
+            await testStartup.loginAsUser('user');
+            expect((await client.get('/api/v1/auth/me')).status).toBe(200);
+        });
+    });
 });

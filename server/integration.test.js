@@ -648,6 +648,25 @@ describe('External Integrations - HTTP API', () => {
             expect(await responseSignatureValid(response, bodyText, inboundSecret)).toBe(true);
         });
 
+        test('pulls have their own size limit, separate from the send limit', async () => {
+            const prevPull = process.env.EXTERNAL_PULL_MAX_CONTENT_BYTES;
+            const prevSend = process.env.EXTERNAL_SHARE_MAX_CONTENT_BYTES;
+            try {
+                process.env.EXTERNAL_SHARE_MAX_CONTENT_BYTES = '1';
+                const allowed = await externalFetch(sampleFilePath, {content: true});
+                expect(allowed.status).toBe(200);
+
+                process.env.EXTERNAL_PULL_MAX_CONTENT_BYTES = '1';
+                const tooLarge = await externalFetch(sampleFilePath, {content: true});
+                expect(tooLarge.status).toBe(413);
+                const metadataOnly = await externalFetch(sampleFilePath);
+                expect(metadataOnly.status).toBe(200);
+            } finally {
+                process.env.EXTERNAL_PULL_MAX_CONTENT_BYTES = prevPull;
+                process.env.EXTERNAL_SHARE_MAX_CONTENT_BYTES = prevSend;
+            }
+        });
+
         test('folder grants are recursive — nested files and subfolders are covered', async () => {
             await testStartup.loginAsUser('creator');
             const midDir = await client.post('/api/v1/files/directory', {dirPath: `${testRoot}/nested`});
