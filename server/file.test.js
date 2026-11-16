@@ -2447,6 +2447,46 @@ describe('File Routes - HTTP API', () => {
             );
             expect(after.data.content).toContain(marker);
         });
+
+        it('closes an open connection when write access is taken away, and the new connection cannot change the file', async () => {
+            await testStartup.loginAsUser('user');
+            const userCookies = client.getCookiesForWebSocket();
+            const closed = new Promise((resolve, reject) => {
+                const ws = new WebSocket(`ws://localhost:${testStartup.port}/yjs${encodeURI(filePath)}`, { headers: { Cookie: userCookies } });
+                const timeout = setTimeout(() => { ws.close(); resolve('still open'); }, 12000);
+                ws.on('close', (code) => { clearTimeout(timeout); resolve(code); });
+                ws.on('error', (error) => { clearTimeout(timeout); reject(error); });
+            });
+            await new Promise((resolve) => setTimeout(resolve, 500));
+
+            await testStartup.loginAsUser('creator');
+            const narrowed = await client.delete(`/api/v1/files/${encodePath(filePath)}/share`, {
+                data: { userIds: [testStartup.user.id], permission: 'write' }
+            });
+            expect(narrowed.status).toBe(200);
+            expect(await closed).toBe(4405);
+
+            await testStartup.loginAsUser('user');
+            const meta = await client.get(`/api/v1/files/${encodePath(filePath)}/metadata`);
+            expect(meta.status).toBe(200);
+            expect(meta.data.canWrite).toBe(false);
+            const before = (await client.get(`/api/v1/files/${encodePath(filePath)}/content`)).data.content;
+            expect(await sendOverYjs(client.getCookiesForWebSocket(), filePath, 'AFTER-NARROWING')).toBe('sent');
+            await new Promise((resolve) => setTimeout(resolve, 1500));
+            const after = (await client.get(`/api/v1/files/${encodePath(filePath)}/content`)).data.content;
+            expect(after).toBe(before);
+        }, 30000);
+
+        it('reports the real size of a flow after it was edited live', async () => {
+            const content = (await client.get(`/api/v1/files/${encodePath(filePath)}/content`)).data.content;
+            const bytes = Buffer.byteLength(content, 'utf8');
+            expect(bytes).toBeGreaterThan(Buffer.byteLength(flowText, 'utf8'));
+            const meta = await waitForResponse(
+                () => client.get(`/api/v1/files/${encodePath(filePath)}/metadata`),
+                (response) => response.data?.size === bytes
+            );
+            expect(meta.data.size).toBe(bytes);
+        });
     });
 
     describe('DOCX file lifecycle', () => {
