@@ -2311,6 +2311,144 @@ describe('File Routes - HTTP API', () => {
         });
     });
 
+    describe('flow files', () => {
+        const WebSocket = require('ws');
+        let dir;
+        let filePath;
+        const flowText = [
+            '<Flow>',
+            '  <Group id="plan" label="Plan" x="0" y="0" width="420" height="220" />',
+            '  <Node id="draft" label="Write a &quot;first&quot; draft" x="24" y="40" group="plan" model="gemma3:27b" />',
+            '  <Node id="check" label="Check" shape="diamond" x="240" y="40" group="plan" />',
+            '  <Edge source="draft" target="check" label="then" />',
+            '</Flow>',
+            ''
+        ].join('\n');
+
+        const sendOverYjs = async (cookies, path, text) => {
+            const clientDoc = new Y.Doc();
+            clientDoc.getText('content').insert(0, text);
+            const update = Y.encodeStateAsUpdate(clientDoc);
+            const header = [0, 1];
+            let length = update.length;
+            while (length > 0x7f) {
+                header.push(0x80 | (length & 0x7f));
+                length >>>= 7;
+            }
+            header.push(length);
+            const frame = Uint8Array.from([...header, ...update]);
+            return new Promise((resolve, reject) => {
+                const ws = new WebSocket(`ws://localhost:${testStartup.port}/yjs${encodeURI(path)}`, { headers: { Cookie: cookies } });
+                const timeout = setTimeout(() => { ws.close(); resolve('closed'); }, 5000);
+                ws.once('message', () => {
+                    ws.send(frame);
+                    setTimeout(() => { clearTimeout(timeout); ws.close(); resolve('sent'); }, 700);
+                });
+                ws.on('close', (code) => { if (code === 4403 || code === 4404) { clearTimeout(timeout); resolve('refused'); } });
+                ws.on('unexpected-response', () => { clearTimeout(timeout); resolve('refused'); });
+                ws.on('error', (error) => { clearTimeout(timeout); reject(error); });
+            });
+        };
+
+        beforeAll(async () => {
+            dir = `/${testStartup.creator.username}/flow-files-${Date.now()}`;
+            filePath = `${dir}/plan.flow`;
+            await testStartup.loginAsUser('creator');
+            const resp = await client.post('/api/v1/files/directory', { dirPath: dir, description: 'Flow files dir' });
+            expect(resp.status).toBe(201);
+        });
+
+        afterAll(async () => {
+            await testStartup.loginAsUser('creator');
+            const undone = await client.delete(`/api/v1/files/${encodePath(filePath)}/share`, {
+                data: { userIds: [testStartup.user.id], permission: 'both' }
+            });
+            expect(undone.status).toBe(200);
+        });
+
+        it('lists flow among the text file types', async () => {
+            const response = await client.get('/api/v1/files/types');
+            expect(response.status).toBe(200);
+            expect(response.data.types.text.extensions).toContain('flow');
+        });
+
+        it('keeps a flow file as text and returns exactly what was saved', async () => {
+            await createFile(filePath, flowText, 'A plan kept as a flow');
+
+            const meta = await client.get(`/api/v1/files/${encodePath(filePath)}/metadata`);
+            expect(meta.status).toBe(200);
+            expect(meta.data.type).toBe('text');
+            expect(meta.data.mimeType).toBe('text/plain');
+            expect(meta.data.canWrite).toBe(true);
+
+            const get = await client.get(`/api/v1/files/${encodePath(filePath)}/content`);
+            expect(get.status).toBe(200);
+            expect(get.data.content).toBe(flowText);
+        });
+
+        it('takes an uploaded flow file as text', async () => {
+            const resp = await uploadFile(Buffer.from(flowText), 'uploaded.flow', dir, 'application/octet-stream');
+            expect(resp.status).toBe(201);
+            const uploaded = `${dir}/uploaded.flow`;
+            const meta = await client.get(`/api/v1/files/${encodePath(uploaded)}/metadata`);
+            expect(meta.data.type).toBe('text');
+            const get = await client.get(`/api/v1/files/${encodePath(uploaded)}/content`);
+            expect(get.data.content).toBe(flowText);
+        });
+
+        it('hides a flow file from a person it is not shared with', async () => {
+            await testStartup.loginAsUser('user');
+            const meta = await client.get(`/api/v1/files/${encodePath(filePath)}/metadata`);
+            expect([403, 404]).toContain(meta.status);
+            const get = await client.get(`/api/v1/files/${encodePath(filePath)}/content`);
+            expect([403, 404]).toContain(get.status);
+            const outcome = await sendOverYjs(client.getCookiesForWebSocket(), filePath, 'INTRUDER');
+            expect(outcome).toBe('refused');
+        });
+
+        it('lets a person with read access see a flow but not change it', async () => {
+            const share = await client.post(`/api/v1/files/${encodePath(filePath)}/share`, {
+                userIds: [testStartup.user.id],
+                permission: 'read'
+            });
+            expect(share.status).toBe(200);
+
+            await testStartup.loginAsUser('user');
+            const meta = await client.get(`/api/v1/files/${encodePath(filePath)}/metadata`);
+            expect(meta.status).toBe(200);
+            expect(meta.data.canWrite).toBe(false);
+            const get = await client.get(`/api/v1/files/${encodePath(filePath)}/content`);
+            expect(get.data.content).toBe(flowText);
+
+            const outcome = await sendOverYjs(client.getCookiesForWebSocket(), filePath, 'READER-EDIT');
+            expect(outcome).toBe('sent');
+            await new Promise((resolve) => setTimeout(resolve, 1500));
+            const after = await client.get(`/api/v1/files/${encodePath(filePath)}/content`);
+            expect(after.data.content).toBe(flowText);
+        });
+
+        it('lets a person with write access change a flow', async () => {
+            const share = await client.post(`/api/v1/files/${encodePath(filePath)}/share`, {
+                userIds: [testStartup.user.id],
+                permission: 'write'
+            });
+            expect(share.status).toBe(200);
+
+            await testStartup.loginAsUser('user');
+            const meta = await client.get(`/api/v1/files/${encodePath(filePath)}/metadata`);
+            expect(meta.data.canWrite).toBe(true);
+
+            const marker = `writer-${Date.now()}`;
+            const outcome = await sendOverYjs(client.getCookiesForWebSocket(), filePath, marker);
+            expect(outcome).toBe('sent');
+            const after = await waitForResponse(
+                () => client.get(`/api/v1/files/${encodePath(filePath)}/content`),
+                (response) => String(response.data?.content ?? '').includes(marker)
+            );
+            expect(after.data.content).toContain(marker);
+        });
+    });
+
     describe('DOCX file lifecycle', () => {
         let dir;
         let filePath;
