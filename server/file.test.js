@@ -1272,6 +1272,37 @@ describe('File Routes - HTTP API', () => {
                 await createFile(`${dir}/upload.txt`, 'first upload');
             });
 
+            test('keeps a text file too large to edit together as a plain file, and a small one as a shared document', async () => {
+                const send = (buffer, filename, overwrite = false) => {
+                    const form = new FormData();
+                    form.append('files', buffer, { filename, contentType: 'text/csv' });
+                    form.append('basePath', dir);
+                    if (overwrite) form.append('overwrite', 'true');
+                    return client.post('/api/v1/files/upload', form, { headers: form.getHeaders(), timeout: 120000, maxBodyLength: Infinity });
+                };
+                const detailsOf = async (name) => {
+                    const response = await client.get(`/api/v1/files/${encodePath(`${dir}/${name}`)}/metadata`);
+                    return response.data.metadata || response.data;
+                };
+                const large = Buffer.alloc(10 * 1024 * 1024 + 1, 'a');
+
+                expect((await send(Buffer.from('a,b\n1,2\n'), 'small.csv')).status).toBe(201);
+                expect((await detailsOf('small.csv')).type).toBe('text');
+                expect((await contentOf(`${dir}/small.csv`)).content).toBe('a,b\n1,2\n');
+
+                const stored = await send(large, 'large.csv');
+                expect(stored.status).toBe(201);
+                expect(stored.data.meta.failedUploads).toBe(0);
+                expect(await detailsOf('large.csv')).toMatchObject({ type: 'binary', size: large.length });
+                const back = await client.get(`/api/v1/files/${encodePath(`${dir}/large.csv`)}/download`, { responseType: 'arraybuffer', timeout: 120000, maxContentLength: Infinity });
+                expect(back.status).toBe(200);
+                expect(Buffer.from(back.data).equals(large)).toBe(true);
+
+                // A shared document replaced by one too large stops being a shared document.
+                expect((await send(large, 'small.csv', true)).status).toBe(201);
+                expect(await detailsOf('small.csv')).toMatchObject({ type: 'binary', size: large.length });
+            }, 180000);
+
             test('skips an existing name by default and reports the conflict', async () => {
                 const response = await upload('ignored');
                 expect(response.status).toBe(201);
