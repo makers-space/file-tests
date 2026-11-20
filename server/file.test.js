@@ -3059,6 +3059,57 @@ describe('File Routes - HTTP API', () => {
             });
         });
 
+        // A folder that does not exist yet used to pass the write check, and ensureParentDirs then made it owned by the
+        // person the path's first part names: anyone could put files into anyone's account.
+        describe('Writing into someone else\'s account', () => {
+            const stamp = Date.now();
+            const exists = async (who, filePath) => {
+                await testStartup.loginAsUser(who);
+                const response = await client.get(`/api/v1/files/${encodePath(filePath)}/metadata`);
+                await testStartup.loginAsUser('creator');
+                return response.status === 200;
+            };
+
+            test('an upload into a new folder in another person\'s unshared space is refused and leaves nothing', async () => {
+                const target = `/${testStartup.user.username}/unshared-${stamp}`;
+                const response = await uploadFile(Buffer.from('not yours'), 'note.txt', target, 'text/plain');
+                expect(response.status).toBe(403);
+                expect(await exists('user', `${target}/note.txt`)).toBe(false);
+                expect(await exists('user', target)).toBe(false);
+            });
+
+            test('a new top-level folder that is not the person\'s own is refused', async () => {
+                const response = await uploadFile(Buffer.from('stray'), 'note.txt', `/stray-top-${stamp}`, 'text/plain');
+                expect(response.status).toBe(403);
+            });
+
+            test('a new folder inside the person\'s own space, or inside one shared with them for writing, is allowed', async () => {
+                const own = await uploadFile(Buffer.from('mine'), 'note.txt', `/${testStartup.creator.username}/fresh-${stamp}/deep`, 'text/plain');
+                expect(own.status).toBe(201);
+                const shared = await uploadFile(Buffer.from('shared'), 'note.txt', `${regularUserRoot}/new-${stamp}`, 'text/plain');
+                expect(shared.status).toBe(201);
+            });
+
+            test('a file path that climbs out of the upload folder is not saved', async () => {
+                const form = new FormData();
+                form.append('files', Buffer.from('escaped'), { filename: 'escape.txt', contentType: 'text/plain' });
+                form.append('basePath', creatorRoot);
+                form.append('relativePaths', JSON.stringify([`../escape-${stamp}.txt`]));
+                await client.post('/api/v1/files/upload', form, { headers: form.getHeaders() });
+                expect(await exists('creator', `/${testStartup.creator.username}/escape-${stamp}.txt`)).toBe(false);
+            });
+
+            test('copy and move into a new folder in another person\'s unshared space are refused', async () => {
+                const source = `${creatorRoot}/cross-${stamp}.txt`;
+                await client.post('/api/v1/files', { filePath: source, content: 'stay home', description: 'Cross test' });
+                const destinationPath = `/${testStartup.user.username}/unshared-copy-${stamp}/cross.txt`;
+                expect((await client.post('/api/v1/files/copy', { sourcePath: source, destinationPath })).status).toBe(403);
+                expect((await client.post('/api/v1/files/move', { sourcePath: source, destinationPath })).status).toBe(403);
+                expect(await exists('creator', source)).toBe(true);
+                expect(await exists('user', destinationPath)).toBe(false);
+            });
+        });
+
         describe('Move across workspaces', () => {
             test('move to another users workspace updates owner to destination workspace owner', async () => {
                 const srcPath = `${creatorRoot}/move-src.txt`;
@@ -4738,6 +4789,16 @@ describe('File Routes - HTTP API', () => {
             for (const name of Object.keys(reloaded.files)) {
                 expect(name.includes('..'), `entry "${name}" must not contain a traversal segment`).toBe(false);
             }
+        });
+
+        it('should refuse extracting into another person\'s unshared space', async () => {
+            await testStartup.loginAsUser('creator');
+            const zipPath = await uploadZip('intruder.zip', { 'note.txt': 'not yours' });
+            const target = `/${testStartup.user.username}/zip-intruder-${Date.now()}`;
+            const response = await client.post('/api/v1/files/extract-zip', { filePath: zipPath, targetPath: target });
+            expect(response.status).toBe(403);
+            await testStartup.loginAsUser('user');
+            expect((await client.get(`/api/v1/files/${encodePath(`${target}/intruder/note.txt`)}/metadata`)).status).toBe(404);
         });
 
         it('should skip macOS resource forks', async () => {
